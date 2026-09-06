@@ -43,7 +43,7 @@ dependencies {
 }
 
 java {
-    toolchain.languageVersion.set(JavaLanguageVersion.of(25))
+    toolchain.languageVersion.set(JavaLanguageVersion.of(26))
 }
 ```
 ##### Maven
@@ -66,7 +66,7 @@ java {
 
 How To (Compiling Jar From Source)
 ------
-To compile Paper, you need JDK 25 and an internet connection.
+To compile Paper, you need JDK 26 and an internet connection.
 
 Clone this repo, run `./gradlew applyPatches`, then `./gradlew createPaperclipJar` from your terminal. You can find the compiled jar in the `paper-server/build/libs` directory.
 
