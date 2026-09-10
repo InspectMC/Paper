@@ -170,6 +170,11 @@ public final class MSpigotConfig {
         return current != null && current.general().optimizedHitDetection();
     }
 
+    public static boolean stagedAutosaveEnabled() {
+        final Snapshot current = snapshot;
+        return current != null && current.autosave().staged();
+    }
+
     public static float potionShootPower() {
         final Snapshot current = snapshot;
         if (current == null || !current.gameplay().potions().fastPots()) {
@@ -529,6 +534,8 @@ public final class MSpigotConfig {
 
         setting("chunks.prevent-loading-for-hoppers", false,
             "Avoid chunk loads from hopper-style neighbor checks where safe.");
+        setting("chunks.optimized-entity-lookups", true,
+            "Use Moonrise's spatial player index for bounded nearest-player and nearby-player checks.");
         setting("ticking.chunk-mode", "VANILLA",
             "Chunk ticking mode: VANILLA, OPTIMIZED, or EXTRA_OPTIMIZED.");
         setting("ticking.chunk-ticking", true, "Enable world chunk ticking.");
@@ -547,6 +554,10 @@ public final class MSpigotConfig {
 
         setting("world.hopper-optimization", true, "Enable mSpigot hopper algorithm shortcuts.");
         setting("world.save-player-data", true, "Persist player data to disk.");
+        setting("world.autosave.staged", true,
+            "Spread periodic global and per-world metadata saves across ticks. Chunk saves remain incremental.");
+        setting("world.autosave.log-completion", false,
+            "Log staged autosave completion time and saved-world count.");
         setting("world.always-day", false, "Force worlds to remain in daytime.");
         setting("world.always-pretty-weather", false, "Force clear weather.");
         setting("world.spawners.spawn-range", 4, "Configured spawner spawn range.");
@@ -566,6 +577,10 @@ public final class MSpigotConfig {
         setting("diagnostics.lag-spike.enabled", false, "Enable the runtime lag-spike detector when the server starts or configuration reloads.");
         setting("diagnostics.lag-spike.threshold-ms", 100.0, "Minimum tick duration in milliseconds considered a lag spike.");
         setting("diagnostics.lag-spike.log-cooldown-seconds", 5, "Minimum time between lag-spike warnings.");
+        setting("diagnostics.lag-spike.synchronous-chunks.enabled", true,
+            "Detect synchronous chunk load/generation waits while the lag-spike detector is enabled.");
+        setting("diagnostics.lag-spike.synchronous-chunks.threshold-ms", 25.0,
+            "Minimum synchronous chunk wait in milliseconds to report with its call site.");
         setting("diagnostics.tps-graph.enabled", true, "Enable /tps graph.");
         setting("diagnostics.tps-graph.seconds", 48, "Seconds of TPS samples displayed by /tps graph.");
         setting("diagnostics.tps-graph.height", 8, "Text rows used by the live TPS graph.");
@@ -695,11 +710,19 @@ public final class MSpigotConfig {
             readTickingSettings(),
             readEntitySettings(),
             readWorldRuntimeSettings(),
+            new AutosaveSettings(
+                config.getBoolean("world.autosave.staged"),
+                config.getBoolean("world.autosave.log-completion")
+            ),
             readGeneralSettings(),
             new DiagnosticsSettings(new LagSpikeSettings(
                 config.getBoolean("diagnostics.lag-spike.enabled"),
                 positive("diagnostics.lag-spike.threshold-ms", 100.0),
-                nonNegativeInt("diagnostics.lag-spike.log-cooldown-seconds", 5)
+                nonNegativeInt("diagnostics.lag-spike.log-cooldown-seconds", 5),
+                new SynchronousChunkSettings(
+                    config.getBoolean("diagnostics.lag-spike.synchronous-chunks.enabled"),
+                    positive("diagnostics.lag-spike.synchronous-chunks.threshold-ms", 25.0)
+                )
             ), new TpsGraphSettings(
                 config.getBoolean("diagnostics.tps-graph.enabled"),
                 Math.max(1, Math.min(300, nonNegativeInt("diagnostics.tps-graph.seconds", 48))),
@@ -1183,7 +1206,6 @@ public final class MSpigotConfig {
             "world-configuration.default.custom-block-rules",
             "chunks.prevent-loading-for-lights",
             "chunks.prevent-loading-for-furnaces",
-            "chunks.optimized-entity-lookups",
             "chunks.reduce-hashing",
             "chunks.optimize-unloading",
             "chunks.optimize-calculations",
@@ -1354,6 +1376,7 @@ public final class MSpigotConfig {
         TickingSettings ticking,
         EntitySettings entities,
         WorldRuntimeSettings worldRuntime,
+        AutosaveSettings autosave,
         GeneralSettings general,
         DiagnosticsSettings diagnostics,
         MiscellaneousSettings miscellaneous,
@@ -1621,6 +1644,9 @@ public final class MSpigotConfig {
     ) {
     }
 
+    public record AutosaveSettings(boolean staged, boolean logCompletion) {
+    }
+
     public record SpawnerRangeSettings(int spawnRange, int minRange, int maxRange, int requiredPlayerRange, int spawnCount, int maxNearbyEntities) {
     }
 
@@ -1637,7 +1663,15 @@ public final class MSpigotConfig {
     public record DiagnosticsSettings(LagSpikeSettings lagSpike, TpsGraphSettings tpsGraph) {
     }
 
-    public record LagSpikeSettings(boolean enabled, double thresholdMs, int logCooldownSeconds) {
+    public record LagSpikeSettings(
+        boolean enabled,
+        double thresholdMs,
+        int logCooldownSeconds,
+        SynchronousChunkSettings synchronousChunks
+    ) {
+    }
+
+    public record SynchronousChunkSettings(boolean enabled, double thresholdMs) {
     }
 
     public record TpsGraphSettings(boolean enabled, int seconds, int height) {

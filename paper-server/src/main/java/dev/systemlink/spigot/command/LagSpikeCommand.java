@@ -48,7 +48,11 @@ public final class LagSpikeCommand extends Command {
         final boolean enabled = LagSpikeDetector.enabled();
         sender.sendMessage(text("Lag-spike detector is ", NamedTextColor.YELLOW)
             .append(text(enabled ? "enabled" : "disabled", enabled ? NamedTextColor.GREEN : NamedTextColor.RED))
-            .append(text(" (threshold " + LagSpikeDetector.thresholdMillis() + " ms).", NamedTextColor.GRAY)));
+            .append(text(" (tick threshold " + LagSpikeDetector.thresholdMillis() + " ms; synchronous chunks "
+                + (LagSpikeDetector.synchronousChunkDetectionEnabled()
+                    ? "at " + LagSpikeDetector.synchronousChunkThresholdMillis() + " ms"
+                    : "disabled")
+                + ").", NamedTextColor.GRAY)));
     }
 
     @Override

@@ -25,12 +25,16 @@ class KnockbackCommandTest {
         when(sender.hasPermission("mspigot.command.knockback.edit")).thenReturn(true);
         final KnockbackCommand command = new KnockbackCommand();
 
+        assertEquals(List.of("kb", "riotkb"), command.getAliases());
+
         assertTrue(command.execute(sender, "knockback", new String[] {"create", "practice"}));
         assertTrue(command.execute(sender, "knockback", new String[] {"set", "practice", "extra-knockback", "0.8"}));
         assertEquals(0.8, MSpigotConfig.get().gameplay().knockback().profiles().get("practice").extraKnockback);
         assertEquals(0.8, YamlConfiguration.loadConfiguration(directory.resolve("knockback.yml").toFile()).getDouble("profiles.practice.extra-knockback"));
         assertFalse(YamlConfiguration.loadConfiguration(directory.resolve("mSpigot.yml").toFile()).contains("gameplay.knockback.profiles.practice"));
         assertEquals(List.of("practice"), command.tabComplete(sender, "knockback", new String[] {"view", "p"}));
+        assertTrue(command.execute(sender, "kb", new String[] {"setkb", "practice"}));
+        assertEquals("practice", MSpigotConfig.get().gameplay().knockback().defaultProfile());
         assertEquals(List.of("true", "false"), command.tabComplete(sender, "knockback", new String[] {"set", "practice", "enabled", ""}));
     }
 }

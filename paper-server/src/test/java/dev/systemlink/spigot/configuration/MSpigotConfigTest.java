@@ -39,6 +39,8 @@ class MSpigotConfigTest {
         assertTrue(defaults.gameplay().tnt().recodedMechanics().enabled());
         assertTrue(defaults.entities().mobAi());
         assertTrue(defaults.worldRuntime().savePlayerData());
+        assertTrue(defaults.autosave().staged());
+        assertTrue(defaults.chunks().optimizedEntityLookups());
         assertTrue(defaults.general().asyncCatcher());
         assertTrue(defaults.general().styledPluginList());
         assertTrue(defaults.diagnostics().tpsGraph().enabled());
@@ -63,12 +65,14 @@ class MSpigotConfigTest {
         assertTrue(yaml.contains("fake-ores:"));
         assertTrue(yaml.contains("flush-consolidation:"));
         assertTrue(yaml.contains("async-command-packet-build:"));
-        assertFalse(yaml.contains("optimized-entity-lookups:"));
+        assertTrue(yaml.contains("optimized-entity-lookups:"));
+        assertTrue(yaml.contains("autosave:"));
         assertTrue(yaml.contains("fast-pots:"));
         assertTrue(yaml.contains("taliban-pearls:"));
         assertTrue(yaml.contains("recoded-mechanics:"));
         assertTrue(yaml.contains("chunk-mode:"));
         assertTrue(yaml.contains("death-screen:"));
+        assertTrue(yaml.contains("synchronous-chunks:"));
         assertTrue(yaml.contains("tps-graph:"));
         assertTrue(yaml.contains("world-profiles:"));
         assertFalse(yaml.contains("combat:"));
@@ -87,6 +91,8 @@ class MSpigotConfigTest {
         assertEquals(2.5, MSpigotConfig.worldSettings("arena").sugarCane().growthMultiplier());
         assertTrue(MSpigotConfig.worldSettings("unconfigured-world").ores().enabled());
         assertEquals(100.0, MSpigotConfig.get().diagnostics().lagSpike().thresholdMs());
+        assertTrue(MSpigotConfig.get().diagnostics().lagSpike().synchronousChunks().enabled());
+        assertEquals(25.0, MSpigotConfig.get().diagnostics().lagSpike().synchronousChunks().thresholdMs());
     }
 
     @Test

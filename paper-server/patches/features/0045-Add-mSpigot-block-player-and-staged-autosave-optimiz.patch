@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Thu, 10 Sep 2026 12:00:00 -0500
+Subject: [PATCH] Add mSpigot block player and staged autosave optimizations
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 85a45f313a28271dbe8e22b66bdb3c159c12f406..3793ec43d8bc3779507e46497c29363b9508f620 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -321,6 +321,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     public static int currentTick; // Paper - improve tick loop
+     public java.util.Queue<Runnable> processQueue = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
+     public int autosavePeriod;
++    private final dev.systemlink.spigot.autosave.AutoSave mspigotAutoSave = new dev.systemlink.spigot.autosave.AutoSave(this); // Paper - Add mSpigot staged autosave
+     // Paper - don't store the vanilla dispatcher
+     public boolean forceTicks;
+     // CraftBukkit end
+@@ -1636,17 +1637,28 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         }
+         Profiler.get().push("save");
+         final boolean fullSave = this.autosavePeriod > 0 && this.tickCount % this.autosavePeriod == 0;
++        final boolean stagedAutosave = dev.systemlink.spigot.configuration.MSpigotConfig.stagedAutosaveEnabled(); // Paper - Add mSpigot staged autosave
+         try {
+             this.isSaving = true;
+             if (playerSaveInterval > 0) {
+                 this.playerList.saveAll(playerSaveInterval);
+             }
+-            if (fullSave) {
+-                this.saveGlobalData(false);
++            // Paper start - Add mSpigot staged autosave
++            if (stagedAutosave) {
++                if (fullSave) {
++                    this.mspigotAutoSave.start(this.getAllLevels());
++                }
++                this.mspigotAutoSave.execute();
++            } else {
++                this.mspigotAutoSave.reset();
++                if (fullSave) {
++                    this.saveGlobalData(false);
++                }
+             }
++            // Paper end - Add mSpigot staged autosave
+             for (final ServerLevel level : this.getAllLevels()) {
+                 if (level.paperConfig().chunks.autoSaveInterval.value() > 0) {
+-                    level.saveIncrementally(fullSave);
++                    level.saveIncrementally(fullSave && !stagedAutosave); // Paper - Add mSpigot staged autosave
+                 }
+             }
+         } finally {
+diff --git a/net/minecraft/server/level/ServerEntityGetter.java b/net/minecraft/server/level/ServerEntityGetter.java
+index cc6f4e2845ef1e95c765d65f17c8aa1b06652927..9a9f508ceec63c308b6f626d7157f55f7f1f0442 100644
+--- a/net/minecraft/server/level/ServerEntityGetter.java
++++ b/net/minecraft/server/level/ServerEntityGetter.java
+@@ -16,13 +16,13 @@ public interface ServerEntityGetter extends EntityGetter {
+     ServerLevel getLevel();
+ 
+     default @Nullable Player getNearestPlayer(final TargetingConditions targetConditions, final LivingEntity source) {
+-        return this.getNearestEntity(this.players(), targetConditions, source, source.getX(), source.getY(), source.getZ());
++        return this.mspigot$getNearestPlayer(targetConditions, source, source.getX(), source.getY(), source.getZ()); // Paper - Add mSpigot PlayerMap
+     }
+ 
+     default @Nullable Player getNearestPlayer(
+         final TargetingConditions targetConditions, final LivingEntity source, final double x, final double y, final double z
+     ) {
+-        return this.getNearestEntity(this.players(), targetConditions, source, x, y, z);
++        return this.mspigot$getNearestPlayer(targetConditions, source, x, y, z); // Paper - Add mSpigot PlayerMap
+     }
+ 
+     default @Nullable Player getNearestPlayer(final TargetingConditions targetConditions, final double x, final double y, final double z) {
+@@ -107,8 +107,11 @@ public interface ServerEntityGetter extends EntityGetter {
+ 
+     default List<Player> getNearbyPlayers(final TargetingConditions targetConditions, final LivingEntity source, final AABB bb) {
+         List<Player> foundPlayers = new ArrayList<>();
++        final double centerX = (bb.minX + bb.maxX) * 0.5; // Paper - Add mSpigot PlayerMap
++        final double centerZ = (bb.minZ + bb.maxZ) * 0.5; // Paper - Add mSpigot PlayerMap
++        final double horizontalRange = Math.max(bb.maxX - bb.minX, bb.maxZ - bb.minZ) * 0.5; // Paper - Add mSpigot PlayerMap
+ 
+-        for (Player player : this.players()) {
++        for (Player player : this.getLevel().playerMap.candidates(centerX, centerZ, horizontalRange)) { // Paper - Add mSpigot PlayerMap
+             if (bb.contains(player.getX(), player.getY(), player.getZ()) && targetConditions.test(this.getLevel(), source, player)) {
+                 foundPlayers.add(player);
+             }
+@@ -117,6 +120,29 @@ public interface ServerEntityGetter extends EntityGetter {
+         return foundPlayers;
+     }
+ 
++    // Paper start - Add mSpigot PlayerMap
++    private @Nullable Player mspigot$getNearestPlayer(
++        final TargetingConditions targetConditions,
++        final LivingEntity source,
++        final double x,
++        final double y,
++        final double z
++    ) {
++        double best = -1.0;
++        Player result = null;
++        for (final Player player : this.getLevel().playerMap.candidates(source.getX(), source.getZ(), targetConditions.range())) {
++            if (targetConditions.test(this.getLevel(), source, player)) {
++                final double distance = player.distanceToSqr(x, y, z);
++                if (best < 0.0 || distance < best) {
++                    best = distance;
++                    result = player;
++                }
++            }
++        }
++        return result;
++    }
++    // Paper end - Add mSpigot PlayerMap
++
+     default <T extends LivingEntity> List<T> getNearbyEntities(
+         final Class<T> type, final TargetingConditions targetConditions, final LivingEntity source, final AABB bb
+     ) {
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 51aad6fa9d18c25d28d92138be83eb688183217a..fd61ac4b1a53647470dbc6877df5f91891f6cde6 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -193,6 +193,8 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private static final int MAX_SCHEDULED_TICKS_PER_TICK = 65536;
+     private static final AtomicInteger ENTITY_COUNTER = new AtomicInteger();
+     private final List<ServerPlayer> players = Lists.newArrayList();
++    public final dev.systemlink.spigot.PlayerMap playerMap = new dev.systemlink.spigot.PlayerMap(this); // Paper - Add mSpigot PlayerMap
++    public final dev.systemlink.spigot.autosave.AutoSaveWorldData autoSaveWorldData = new dev.systemlink.spigot.autosave.AutoSaveWorldData(this); // Paper - Add mSpigot staged autosave
+     private final ServerChunkCache chunkSource;
+     private final MinecraftServer server;
+     public final io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData; // Paper - type
+@@ -2411,6 +2413,16 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         return this.players;
+     }
+ 
++    // Paper start - Add mSpigot PlayerMap and staged autosave
++    public dev.systemlink.spigot.PlayerMap getPlayerMap() {
++        return this.playerMap;
++    }
++
++    public dev.systemlink.spigot.autosave.AutoSaveWorldData getAutoSaveWorldData() {
++        return this.autoSaveWorldData;
++    }
++    // Paper end - Add mSpigot PlayerMap and staged autosave
++
+     @Override
+     public void updatePOIOnBlockStateChange(final BlockPos pos, final BlockState oldState, final BlockState newState) {
+         Optional<Holder<PoiType>> oldType = PoiTypes.forState(oldState);
+diff --git a/net/minecraft/world/entity/ai/targeting/TargetingConditions.java b/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
+index 832260c9b2adabd715545ea7e4c0b4c6d4a13d68..400131c38b08cabce8dd75b1054dec69aea293c3 100644
+--- a/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
++++ b/net/minecraft/world/entity/ai/targeting/TargetingConditions.java
+@@ -41,6 +41,12 @@ public class TargetingConditions {
+         return this;
+     }
+ 
++    // Paper start - Add mSpigot PlayerMap
++    public double range() {
++        return this.range;
++    }
++    // Paper end - Add mSpigot PlayerMap
++
+     public TargetingConditions ignoreLineOfSight() {
+         this.checkLineOfSight = false;
+         return this;
+diff --git a/net/minecraft/world/level/EntityGetter.java b/net/minecraft/world/level/EntityGetter.java
+index 0b004dca686fd99f8740d52ffa74051c9886a4b9..c5fec8cd5a732d2379119927510195b5df1c68be 100644
+--- a/net/minecraft/world/level/EntityGetter.java
++++ b/net/minecraft/world/level/EntityGetter.java
+@@ -126,7 +126,7 @@ public interface EntityGetter extends ca.spottedleaf.moonrise.patches.chunk_syst
+         double best = -1.0;
+         Player result = null;
+ 
+-        for (Player player : this.players()) {
++        for (Player player : this.mspigot$playersForLookup(x, z, range)) { // Paper - Add mSpigot PlayerMap
+             if (predicate == null || predicate.test(player)) {
+                 double dist = player.distanceToSqr(x, y, z);
+                 if ((range < 0.0 || dist < range * range) && (best == -1.0 || dist < best)) {
+@@ -143,7 +143,7 @@ public interface EntityGetter extends ca.spottedleaf.moonrise.patches.chunk_syst
+     default List<org.bukkit.entity.HumanEntity> findNearbyBukkitPlayers(double x, double y, double z, double range, @Nullable Predicate<Entity> predicate) {
+         ImmutableList.Builder<org.bukkit.entity.HumanEntity> players = ImmutableList.builder();
+ 
+-        for (Player player : this.players()) {
++        for (Player player : this.mspigot$playersForLookup(x, z, range)) { // Paper - Add mSpigot PlayerMap
+             if (predicate == null || predicate.test(player)) {
+                 double dist = player.distanceToSqr(x, y, z);
+ 
+@@ -173,7 +173,7 @@ public interface EntityGetter extends ca.spottedleaf.moonrise.patches.chunk_syst
+     }
+ 
+     default boolean hasNearbyAlivePlayerThatAffectsSpawning(double x, double y, double z, double range) {
+-        for (Player player : this.players()) {
++        for (Player player : this.mspigot$playersForLookup(x, z, range)) { // Paper - Add mSpigot PlayerMap
+             if (EntitySelector.PLAYER_AFFECTS_SPAWNING.test(player)) { // combines NO_SPECTATORS and LIVING_ENTITY_STILL_ALIVE with an "affects spawning" check
+                 double playerDist = player.distanceToSqr(x, y, z);
+                 if (range < 0.0 || playerDist < range * range) {
+@@ -186,7 +186,7 @@ public interface EntityGetter extends ca.spottedleaf.moonrise.patches.chunk_syst
+     // Paper end - Affects Spawning API
+ 
+     default boolean hasNearbyAlivePlayer(final double x, final double y, final double z, final double range) {
+-        for (Player player : this.players()) {
++        for (Player player : this.mspigot$playersForLookup(x, z, range)) { // Paper - Add mSpigot PlayerMap
+             if (EntitySelector.NO_SPECTATORS.test(player) && EntitySelector.LIVING_ENTITY_STILL_ALIVE.test(player)) {
+                 double playerDist = player.distanceToSqr(x, y, z);
+                 if (range < 0.0 || playerDist < range * range) {
+@@ -198,6 +198,12 @@ public interface EntityGetter extends ca.spottedleaf.moonrise.patches.chunk_syst
+         return false;
+     }
+ 
++    // Paper start - Add mSpigot PlayerMap
++    private Iterable<? extends Player> mspigot$playersForLookup(final double x, final double z, final double range) {
++        return this instanceof net.minecraft.server.level.ServerLevel level ? level.playerMap.candidates(x, z, range) : this.players();
++    }
++    // Paper end - Add mSpigot PlayerMap
++
+     default @Nullable Player getPlayerByUUID(final UUID uuid) {
+         for (int i = 0; i < this.players().size(); i++) {
+             Player player = this.players().get(i);
+diff --git a/net/minecraft/world/level/block/Block.java b/net/minecraft/world/level/block/Block.java
+index 29f5182c8528bfdced6a3c2c145e58721e723777..1a53418b32a31fe137b5e1f2d92d12a35b863579 100644
+--- a/net/minecraft/world/level/block/Block.java
++++ b/net/minecraft/world/level/block/Block.java
+@@ -80,6 +80,7 @@ public class Block extends BlockBehaviour implements ItemLike {
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private final Holder.Reference<Block> builtInRegistryHolder = BuiltInRegistries.BLOCK.createIntrusiveHolder(this);
+     public static final IdMapper<BlockState> BLOCK_STATE_REGISTRY = new IdMapper<>();
++    private static final dev.systemlink.spigot.blocks.BlockAccessCache MSPIGOT_BLOCK_ACCESS_CACHE = new dev.systemlink.spigot.blocks.BlockAccessCache(); // Paper - Add mSpigot block access cache
+     private static final LoadingCache<VoxelShape, Boolean> SHAPE_FULL_BLOCK_CACHE = CacheBuilder.newBuilder()
+         .maximumSize(512L)
+         .weakKeys()
+@@ -157,6 +158,12 @@ public class Block extends BlockBehaviour implements ItemLike {
+         return state == null ? Blocks.AIR.defaultBlockState() : state;
+     }
+ 
++    // Paper start - Add mSpigot block access cache
++    public static Block byId(final int id) {
++        return MSPIGOT_BLOCK_ACCESS_CACHE.getById(id);
++    }
++    // Paper end - Add mSpigot block access cache
++
+     public static Block byItem(final @Nullable Item item) {
+         return item instanceof BlockItem blockItem ? blockItem.getBlock() : Blocks.AIR;
+     }

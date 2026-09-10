@@ -19,14 +19,14 @@ import static net.kyori.adventure.text.Component.text;
 /** Manages the knockback profiles stored in {@code knockback.yml}. */
 public final class KnockbackCommand extends Command {
     private static final String EDIT_PERMISSION = "mspigot.command.knockback.edit";
-    private static final List<String> SUBCOMMANDS = List.of("list", "view", "create", "delete", "set", "default", "assign", "reload");
+    private static final List<String> SUBCOMMANDS = List.of("list", "view", "check", "create", "delete", "set", "default", "setkb", "assign", "reload");
 
     public KnockbackCommand() {
         super("knockback");
         this.description = "Manage mSpigot knockback profiles";
         this.usageMessage = "/knockback <list|view|create|delete|set|default|assign|reload>";
         this.setPermission("mspigot.command.knockback");
-        this.setAliases(List.of("kb"));
+        this.setAliases(List.of("kb", "riotkb"));
     }
 
     @Override
@@ -43,10 +43,12 @@ public final class KnockbackCommand extends Command {
             return switch (args[0].toLowerCase(Locale.ROOT)) {
                 case "list" -> this.list(sender);
                 case "view" -> this.view(sender, args);
+                case "check" -> this.view(sender, new String[] {"view"});
                 case "create" -> this.create(sender, args);
                 case "delete" -> this.delete(sender, args);
                 case "set" -> this.set(sender, args);
                 case "default" -> this.setDefault(sender, args);
+                case "setkb" -> this.setDefault(sender, args);
                 case "assign" -> this.assign(sender, args);
                 case "reload" -> this.reload(sender, args);
                 default -> {
@@ -196,7 +198,7 @@ public final class KnockbackCommand extends Command {
         final String subcommand = args[0].toLowerCase(Locale.ROOT);
         if (args.length == 2) {
             return switch (subcommand) {
-                case "view", "delete", "set", "default" -> matches(args[1], MSpigotConfig.knockbackProfileNames());
+                case "view", "delete", "set", "default", "setkb" -> matches(args[1], MSpigotConfig.knockbackProfileNames());
                 case "assign" -> matches(args[1], Bukkit.getWorlds().stream().map(World::getName).toList());
                 default -> List.of();
             };

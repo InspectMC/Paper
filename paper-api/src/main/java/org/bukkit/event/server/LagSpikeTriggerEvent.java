@@ -34,9 +34,11 @@ public class LagSpikeTriggerEvent extends ServerEvent {
     }
 
     /**
-     * Gets the full server tick duration, in nanoseconds.
+     * Gets the duration of the operation that triggered the detector, in nanoseconds.
+     * For a tick trigger this is the full server tick duration; for a synchronous
+     * chunk trigger this is the time that the calling thread was blocked.
      *
-     * @return the full server total duration
+     * @return the triggering operation's duration
      */
     public long getFullServerTotal() {
         return this.fullServerTotal;

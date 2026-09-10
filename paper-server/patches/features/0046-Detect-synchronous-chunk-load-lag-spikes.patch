@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Thu, 10 Sep 2026 18:41:45 -0500
+Subject: [PATCH] Detect synchronous chunk load lag spikes
+
+
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index b731c0bb99ec00894646516d1c08335d01b591ca..e1ef630108d2eb6a2268e75dfc9f11fa1373f6b0 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -114,18 +114,31 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+             );
+         }
+ 
+-        if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(this.level, chunkX, chunkZ)) {
+-            ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.pushChunkWait(this.level, chunkX, chunkZ);
+-            this.mainThreadProcessor.managedBlock(completable::isDone);
+-            ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.popChunkWait();
+-        }
++        // Paper start - Detect synchronous chunk load/generation lag spikes
++        final long synchronousWaitStarted = !completable.isDone()
++            ? dev.systemlink.spigot.diagnostics.LagSpikeDetector.startSynchronousChunkWait()
++            : 0L;
++        try {
++            if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(this.level, chunkX, chunkZ)) {
++                ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.pushChunkWait(this.level, chunkX, chunkZ);
++                try {
++                    this.mainThreadProcessor.managedBlock(completable::isDone);
++                } finally {
++                    ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.popChunkWait();
++                }
++            }
+ 
+-        final ChunkAccess ret = completable.join();
+-        if (ret == null) {
+-            throw new IllegalStateException("Chunk not loaded when requested");
++            final ChunkAccess ret = completable.join();
++            if (ret == null) {
++                throw new IllegalStateException("Chunk not loaded when requested");
++            }
++            return ret;
++        } finally {
++            dev.systemlink.spigot.diagnostics.LagSpikeDetector.recordSynchronousChunkWait(
++                this.level, chunkX, chunkZ, toStatus, synchronousWaitStarted
++            );
+         }
+-
+-        return ret;
++        // Paper end - Detect synchronous chunk load/generation lag spikes
+     }
+ 
+     private ChunkAccess getChunkFallback(final int chunkX, final int chunkZ, final ChunkStatus toStatus,
+@@ -353,7 +366,18 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         CompletableFuture<ChunkResult<ChunkAccess>> serverFuture;
+         if (isMainThread) {
+             serverFuture = this.getChunkFutureMainThread(x, z, targetStatus, loadOrGenerate);
+-            this.mainThreadProcessor.managedBlock(serverFuture::isDone);
++            // Paper start - Detect synchronous chunk load/generation lag spikes
++            final long synchronousWaitStarted = !serverFuture.isDone()
++                ? dev.systemlink.spigot.diagnostics.LagSpikeDetector.startSynchronousChunkWait()
++                : 0L;
++            try {
++                this.mainThreadProcessor.managedBlock(serverFuture::isDone);
++            } finally {
++                dev.systemlink.spigot.diagnostics.LagSpikeDetector.recordSynchronousChunkWait(
++                    this.level, x, z, targetStatus, synchronousWaitStarted
++                );
++            }
++            // Paper end - Detect synchronous chunk load/generation lag spikes
+         } else {
+             serverFuture = CompletableFuture.<CompletableFuture<ChunkResult<ChunkAccess>>>supplyAsync(
+                     () -> this.getChunkFutureMainThread(x, z, targetStatus, loadOrGenerate), this.mainThreadProcessor
