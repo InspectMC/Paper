@@ -290,6 +290,14 @@ class PaperPluginInstanceManager {
         }
 
         try {
+            this.server.mspigot().getPacketService().unregisterPacketHandlerFor(plugin);
+            this.server.mspigot().getMovementService().unregisterMovementHandlerFor(plugin);
+        } catch (Throwable ex) {
+            this.handlePluginException("Error occurred while unregistering mSpigot handlers for "
+                + pluginName + " (Is it up to date?)", ex, plugin);
+        }
+
+        try {
             HandlerList.unregisterAll(plugin);
         } catch (Throwable ex) {
             this.handlePluginException("Error occurred (in the plugin loader) while unregistering events for "

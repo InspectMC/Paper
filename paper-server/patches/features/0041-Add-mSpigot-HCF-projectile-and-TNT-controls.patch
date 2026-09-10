@@ -1,0 +1,337 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 20:12:48 -0500
+Subject: [PATCH] Add mSpigot HCF projectile and TNT controls
+
+
+diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
+index c4396509584011a5bbc171510478e8e62ce44d94..e2150b8b3e59e1dffa2e495b44db0aa3bfc4bf22 100644
+--- a/net/minecraft/commands/Commands.java
++++ b/net/minecraft/commands/Commands.java
+@@ -488,7 +488,11 @@ public class Commands {
+         // Paper start - Perf: Async command map building
+         // Copy root children to avoid concurrent modification during building
+         final java.util.Collection<CommandNode<CommandSourceStack>> commandNodes = new java.util.ArrayList<>(this.dispatcher.getRoot().getChildren());
+-        COMMAND_SENDING_POOL.execute(() -> this.sendAsync(player, commandNodes));
++        if (dev.systemlink.spigot.configuration.MSpigotConfig.asyncCommandPacketBuildEnabled()) {
++            COMMAND_SENDING_POOL.execute(() -> this.sendAsync(player, commandNodes));
++        } else {
++            this.sendSync(player, commandNodes);
++        }
+     }
+ 
+     // Fixed pool, but with discard policy
+@@ -520,6 +524,19 @@ public class Commands {
+         });
+     }
+ 
++    private void sendSync(ServerPlayer player, java.util.Collection<CommandNode<CommandSourceStack>> dispatcherRootChildren) {
++        Map<CommandNode<CommandSourceStack>, CommandNode<CommandSourceStack>> playerCommands = new HashMap<>();
++        RootCommandNode<CommandSourceStack> root = new RootCommandNode<>();
++        playerCommands.put(this.dispatcher.getRoot(), root);
++        fillUsableCommands(dispatcherRootChildren, root, player.createCommandSourceStack(), playerCommands);
++
++        java.util.Collection<String> bukkit = new java.util.LinkedHashSet<>();
++        for (CommandNode node : root.getChildren()) {
++            bukkit.add(node.getName());
++        }
++        this.runSync(player, bukkit, root);
++    }
++
+     private void runSync(ServerPlayer player, java.util.Collection<String> bukkit, RootCommandNode<CommandSourceStack> root) {
+         // Paper end - Perf: Async command map building
+         new com.destroystokyo.paper.event.brigadier.AsyncPlayerSendCommandsEvent<CommandSourceStack>(player.getBukkitEntity(), (RootCommandNode) root, true).callEvent(); // Paper - Brigadier API
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index c7ead495d1a0027e45a1cb2e38ddd55cc52b1506..c83e66079e5d976e60db001fca936568a953c230 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1662,6 +1662,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         profiler.push("tallying");
+         long tickTime = Util.getNanos() - nano;
+         dev.systemlink.spigot.diagnostics.LagSpikeDetector.recordTick(this.tickCount, tickTime); // Paper - SystemLink lag-spike detector
++        dev.systemlink.spigot.diagnostics.MSpigotTpsGraph.recordTick(this.tickCount, tickTime); // Paper - mSpigot live TPS graph
+         int tickIndex = this.tickCount % 100;
+         this.aggregatedTickTimesNanos = this.aggregatedTickTimesNanos - this.tickTimesNanos[tickIndex];
+         this.aggregatedTickTimesNanos += tickTime;
+diff --git a/net/minecraft/server/level/TicketType.java b/net/minecraft/server/level/TicketType.java
+index fed2a68bf1a9e9a169c0235e129346b9b624170b..79b44d2f3896ebb7fa8c228d0357c64081a53d0e 100644
+--- a/net/minecraft/server/level/TicketType.java
++++ b/net/minecraft/server/level/TicketType.java
+@@ -62,6 +62,7 @@ public final class TicketType<T> implements ca.spottedleaf.moonrise.patches.chun
+     public static final TicketType FORCED = register("forced", NO_TIMEOUT, FLAG_PERSIST | FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE);
+     public static final TicketType PORTAL = register("portal", 300L, FLAG_PERSIST | FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE);
+     public static final TicketType ENDER_PEARL = register("ender_pearl", 40L, FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE);
++    public static final TicketType MSPIGOT_TNT = register("mspigot_tnt", 5L, FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE); // Paper - mSpigot TNT mechanics
+     public static final TicketType UNKNOWN = register("unknown", 1L, FLAG_CAN_EXPIRE_IF_UNLOADED | FLAG_LOADING);
+     public static final TicketType PLUGIN = register("plugin", NO_TIMEOUT, FLAG_LOADING | FLAG_SIMULATION); // CraftBukkit
+     public static final TicketType POST_TELEPORT = register("post_teleport", 5L, FLAG_LOADING | FLAG_SIMULATION); // Paper
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index b20fb4631cdb79e17d9c7ce92d3f31cc4a55c76c..658f55ad318155e3d475dc5cae840e811b71492c 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -2722,6 +2722,10 @@ public class ServerGamePacketListenerImpl
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+         if (this.player.isImmobile()) return; // CraftBukkit
+         this.player.resetLastActionTime();
++        if (this.mSpigotSuppressLeftShooting()) {
++            this.player.swing(packet.getHand());
++            return;
++        }
+         // CraftBukkit start - Raytrace to look for 'rogue armswings'
+         Location origin = CraftLocation.toBukkit(this.player.getEyePosition(), this.player.level(), this.player.getYRot(), this.player.getXRot());
+         double maxRange = Math.max(this.player.blockInteractionRange(), this.player.entityInteractionRange()); // todo flawed
+@@ -2751,6 +2755,22 @@ public class ServerGamePacketListenerImpl
+         this.player.swing(packet.getHand());
+     }
+ 
++    private boolean mSpigotSuppressLeftShooting() {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot == null || !systemLinkSnapshot.gameplay().tnt().disableLeftShooting()) {
++            return false;
++        }
++        final ItemStack itemStack = this.player.getInventory().getSelectedItem();
++        return itemStack.is(Items.ENDER_PEARL)
++            || itemStack.is(Items.SPLASH_POTION)
++            || itemStack.is(Items.LINGERING_POTION)
++            || itemStack.is(Items.SNOWBALL)
++            || itemStack.is(Items.EGG)
++            || itemStack.is(Items.BOW)
++            || itemStack.is(Items.CROSSBOW)
++            || itemStack.is(Items.TRIDENT);
++    }
++
+     @Override
+     public void handlePlayerCommand(final ServerboundPlayerCommandPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+diff --git a/net/minecraft/world/entity/item/PrimedTnt.java b/net/minecraft/world/entity/item/PrimedTnt.java
+index 237d579c4fa760e6f6c8f8e747873b115d04d1bd..241a557539af3c1142511a0ff5300161cdfbeb7a 100644
+--- a/net/minecraft/world/entity/item/PrimedTnt.java
++++ b/net/minecraft/world/entity/item/PrimedTnt.java
+@@ -7,6 +7,7 @@ import net.minecraft.network.syncher.EntityDataAccessor;
+ import net.minecraft.network.syncher.EntityDataSerializers;
+ import net.minecraft.network.syncher.SynchedEntityData;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.level.TicketType;
+ import net.minecraft.util.Mth;
+ import net.minecraft.util.RandomSource;
+ import net.minecraft.world.damagesource.DamageSource;
+@@ -21,6 +22,7 @@ import net.minecraft.world.level.BlockGetter;
+ import net.minecraft.world.level.Explosion;
+ import net.minecraft.world.level.ExplosionDamageCalculator;
+ import net.minecraft.world.level.Level;
++import net.minecraft.world.level.ChunkPos;
+ import net.minecraft.world.level.block.Blocks;
+ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.level.gamerules.GameRules;
+@@ -74,7 +76,15 @@ public class PrimedTnt extends Entity implements TraceableEntity {
+         this.setPos(x, y, z);
+         double rot = this.getRandom().nextDouble() * (float) (Math.PI * 2); // Paper - Don't use level random in entity constructors
+         this.setDeltaMovement(-Math.sin(rot) * 0.02, 0.2F, -Math.cos(rot) * 0.02);
+-        this.setFuse(80);
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot != null && systemLinkSnapshot.gameplay().tnt().recodedMechanics().enabled()) {
++            if (systemLinkSnapshot.gameplay().tnt().stableInitialMotion()) {
++                this.setDeltaMovement(0.0, 0.2F, 0.0);
++            }
++            this.setFuse(systemLinkSnapshot.gameplay().tnt().fuseTicks());
++        } else {
++            this.setFuse(80);
++        }
+         this.xo = x;
+         this.yo = y;
+         this.zo = z;
+@@ -104,7 +114,12 @@ public class PrimedTnt extends Entity implements TraceableEntity {
+ 
+     @Override
+     public void tick() {
+-        if (this.level().spigotConfig.maxTntTicksPerTick > 0 && ++this.level().spigotConfig.currentPrimedTnt > this.level().spigotConfig.maxTntTicksPerTick) { return; } // Spigot
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        final int maxTntTicks = systemLinkSnapshot != null && systemLinkSnapshot.gameplay().tnt().maxActivePerWorld() > 0
++            ? systemLinkSnapshot.gameplay().tnt().maxActivePerWorld()
++            : this.level().spigotConfig.maxTntTicksPerTick;
++        if (maxTntTicks > 0 && ++this.level().spigotConfig.currentPrimedTnt > maxTntTicks) { return; } // Spigot // Paper - mSpigot configurable TNT cap
++        this.mSpigotRefreshChunkTicket(systemLinkSnapshot);
+         this.handlePortal();
+         this.applyGravity();
+         this.move(MoverType.SELF, this.getDeltaMovement());
+@@ -167,6 +182,13 @@ public class PrimedTnt extends Entity implements TraceableEntity {
+         }
+     }
+ 
++    private void mSpigotRefreshChunkTicket(final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot) {
++        if (systemLinkSnapshot == null || !systemLinkSnapshot.gameplay().tnt().keepChunksLoaded().enabled() || !(this.level() instanceof ServerLevel serverLevel)) {
++            return;
++        }
++        serverLevel.getChunkSource().addTicketWithRadius(TicketType.MSPIGOT_TNT, new ChunkPos(this.getBlockX() >> 4, this.getBlockZ() >> 4), systemLinkSnapshot.gameplay().tnt().keepChunksLoadedRadius());
++    }
++
+     @Override
+     protected void addAdditionalSaveData(final ValueOutput output) {
+         output.putShort("fuse", (short)this.getFuse());
+diff --git a/net/minecraft/world/entity/projectile/ProjectileUtil.java b/net/minecraft/world/entity/projectile/ProjectileUtil.java
+index 7a94272f5d773ead519f4ddee908722e3f4cbd7a..6611db52472a13430835e92d785dbd0ba83b87b0 100644
+--- a/net/minecraft/world/entity/projectile/ProjectileUtil.java
++++ b/net/minecraft/world/entity/projectile/ProjectileUtil.java
+@@ -151,6 +151,9 @@ public final class ProjectileUtil {
+     }
+ 
+     public static float computeMargin(final Entity source) {
++        if (dev.systemlink.spigot.configuration.MSpigotConfig.optimizedHitDetectionEnabled()) {
++            return source.tickCount < 2 ? 0.0F : DEFAULT_ENTITY_HIT_RESULT_MARGIN;
++        }
+         return Math.max(0.0F, Math.min(0.3F, (source.tickCount - 2) / 20.0F));
+     }
+ 
+diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+index 1ef54320e7d47053f4d8be6851ba341ef7986cbe..9adca773bb45ff127dea7f3a79b497fa08285a99 100644
+--- a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
++++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+@@ -8,6 +8,7 @@ import net.minecraft.server.level.ServerLevel;
+ import net.minecraft.server.level.ServerPlayer;
+ import net.minecraft.sounds.SoundEvents;
+ import net.minecraft.sounds.SoundSource;
++import net.minecraft.tags.BlockTags;
+ import net.minecraft.world.Difficulty;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.entity.EntityReference;
+@@ -25,6 +26,7 @@ import net.minecraft.world.level.block.Blocks;
+ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.level.gamerules.GameRules;
+ import net.minecraft.world.level.portal.TeleportTransition;
++import net.minecraft.world.phys.BlockHitResult;
+ import net.minecraft.world.phys.EntityHitResult;
+ import net.minecraft.world.phys.HitResult;
+ import net.minecraft.world.phys.Vec3;
+@@ -101,7 +103,7 @@ public class ThrownEnderpearl extends ThrowableItemProjectile {
+         if (this.level() instanceof ServerLevel level && !this.isRemoved()) {
+             Entity owner = this.getOwner();
+             if (owner != null && isAllowedToTeleportOwner(owner, level)) {
+-                Vec3 teleportPos = this.oldPosition();
++                Vec3 teleportPos = this.mSpigotTeleportPosition(hitResult, level);
+                 if (owner instanceof ServerPlayer player) {
+                     if (player.connection.isAcceptingMessages()) {
+                         // CraftBukkit start
+@@ -178,6 +180,42 @@ public class ThrownEnderpearl extends ThrowableItemProjectile {
+         }
+     }
+ 
++    private Vec3 mSpigotTeleportPosition(final HitResult hitResult, final ServerLevel level) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot == null || !systemLinkSnapshot.gameplay().pearls().talibanPearls() || !(hitResult instanceof BlockHitResult blockHitResult) || blockHitResult.isWorldBorderHit()) {
++            return this.oldPosition();
++        }
++
++        final BlockPos pos = blockHitResult.getBlockPos();
++        final BlockState state = level.getBlockState(pos);
++        final dev.systemlink.spigot.configuration.MSpigotConfig.PearlSettings settings = systemLinkSnapshot.gameplay().pearls();
++        if (!mSpigotAllowsPearlThrough(state, level, pos, settings)) {
++            return this.oldPosition();
++        }
++
++        Vec3 direction = this.getDeltaMovement();
++        if (direction.lengthSqr() < 1.0E-7) {
++            direction = blockHitResult.getDirection().getUnitVec3().scale(-1.0);
++        } else {
++            direction = direction.normalize();
++        }
++        return blockHitResult.getLocation().add(direction.scale(settings.passThroughDistance()));
++    }
++
++    private static boolean mSpigotAllowsPearlThrough(
++        final BlockState state,
++        final ServerLevel level,
++        final BlockPos pos,
++        final dev.systemlink.spigot.configuration.MSpigotConfig.PearlSettings settings
++    ) {
++        return settings.partialBlocks() && !state.isCollisionShapeFullBlock(level, pos)
++            || settings.fences() && (state.is(BlockTags.FENCES) || state.is(BlockTags.FENCE_GATES) || state.is(BlockTags.WALLS))
++            || settings.stairsAndSlabs() && (state.is(BlockTags.STAIRS) || state.is(BlockTags.SLABS))
++            || settings.trapdoors() && state.is(BlockTags.TRAPDOORS)
++            || settings.chests() && (state.is(Blocks.CHEST) || state.is(Blocks.TRAPPED_CHEST) || state.is(Blocks.ENDER_CHEST) || state.is(BlockTags.COPPER_CHESTS))
++            || settings.tripwire() && (state.is(Blocks.TRIPWIRE) || state.is(Blocks.TRIPWIRE_HOOK));
++    }
++
+     @Override
+     public void tick() {
+         if (this.level() instanceof ServerLevel serverLevel) {
+diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownSplashPotion.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownSplashPotion.java
+index c55411e0ddf6e75cf1e26e9dad1d3328552f78a7..ffacde25755d0d00b643793675b7d53c38a6c10a 100644
+--- a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownSplashPotion.java
++++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownSplashPotion.java
+@@ -45,8 +45,9 @@ public class ThrownSplashPotion extends AbstractThrownPotion {
+         AABB potionAabb = hitResult == null ? this.getBoundingBox() : this.getBoundingBox().move(hitResult.getLocation().subtract(this.position())); // Paper - More projectile API
+         AABB effectAabb = potionAabb.inflate(4.0, 2.0, 4.0);
+         List<LivingEntity> entities = this.level().getEntitiesOfClass(LivingEntity.class, effectAabb);
+-        java.util.Map<org.bukkit.entity.LivingEntity, Double> affected = new java.util.HashMap<>(); // CraftBukkit
+-        float margin = ProjectileUtil.computeMargin(this);
++        java.util.Map<org.bukkit.entity.LivingEntity, Double> affected = new java.util.HashMap<>(Math.max(4, entities.size())); // CraftBukkit // Paper - mSpigot optimize splash detection
++        final boolean systemLinkOptimizedSplash = dev.systemlink.spigot.configuration.MSpigotConfig.current() != null && dev.systemlink.spigot.configuration.MSpigotConfig.current().gameplay().potions().optimizedSplashDetection();
++        float margin = systemLinkOptimizedSplash ? 0.0F : ProjectileUtil.computeMargin(this);
+         if (!entities.isEmpty()) {
+             Entity effectSource = this.getEffectSource();
+ 
+diff --git a/net/minecraft/world/item/ThrowablePotionItem.java b/net/minecraft/world/item/ThrowablePotionItem.java
+index af7b078cb1b63d20e11481d7de6c5ebc15312bb2..6f30fc2479e578143087667d9180eb6e7068f228 100644
+--- a/net/minecraft/world/item/ThrowablePotionItem.java
++++ b/net/minecraft/world/item/ThrowablePotionItem.java
+@@ -24,7 +24,7 @@ public abstract class ThrowablePotionItem extends PotionItem implements Projecti
+         ItemStack itemStack = player.getItemInHand(hand);
+         if (level instanceof ServerLevel serverLevel) {
+             // Paper start - PlayerLaunchProjectileEvent
+-            final Projectile.Delayed<AbstractThrownPotion> thrownPotion = Projectile.spawnProjectileFromRotationDelayed(this::createPotion, serverLevel, itemStack, player, -20.0F, 0.5F, 1.0F);
++            final Projectile.Delayed<AbstractThrownPotion> thrownPotion = Projectile.spawnProjectileFromRotationDelayed(this::createPotion, serverLevel, itemStack, player, -20.0F, dev.systemlink.spigot.configuration.MSpigotConfig.potionShootPower(), 1.0F);
+             com.destroystokyo.paper.event.player.PlayerLaunchProjectileEvent event = new com.destroystokyo.paper.event.player.PlayerLaunchProjectileEvent((org.bukkit.entity.Player) player.getBukkitEntity(), org.bukkit.craftbukkit.inventory.CraftItemStack.asCraftMirror(itemStack), (org.bukkit.entity.Projectile) thrownPotion.projectile().getBukkitEntity());
+             if (event.callEvent() && thrownPotion.attemptSpawn()) {
+                 if (event.shouldConsume()) {
+diff --git a/net/minecraft/world/level/ServerExplosion.java b/net/minecraft/world/level/ServerExplosion.java
+index 91bb2ac15b9e9350552f4eeb9573c2f564854ce4..a71f8a2745a46f1f9f035df4c06a0d4daacf3160 100644
+--- a/net/minecraft/world/level/ServerExplosion.java
++++ b/net/minecraft/world/level/ServerExplosion.java
+@@ -587,6 +587,8 @@ public class ServerExplosion implements Explosion {
+             return;
+         }
+         // CraftBukkit end
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        final boolean systemLinkEfficientWallDamage = systemLinkSnapshot != null && systemLinkSnapshot.gameplay().tnt().efficientWallDamage() && this.source instanceof PrimedTnt;
+ 
+         for (BlockPos pos : targetBlocks) {
+             // CraftBukkit start - TNTPrimeEvent
+@@ -602,11 +604,17 @@ public class ServerExplosion implements Explosion {
+             }
+             // CraftBukkit end
+ 
+-            this.level.getBlockState(pos).onExplosionHit(this.level, pos, this, (stackx, position) -> addOrAppendStack(stacks, stackx, position));
++            this.level.getBlockState(pos).onExplosionHit(this.level, pos, this, (stackx, position) -> {
++                if (!systemLinkEfficientWallDamage) {
++                    addOrAppendStack(stacks, stackx, position);
++                }
++            });
+         }
+ 
+-        for (ServerExplosion.StackCollector stack : stacks) {
+-            Block.popResource(this.level, stack.pos, stack.stack);
++        if (!systemLinkEfficientWallDamage) {
++            for (ServerExplosion.StackCollector stack : stacks) {
++                Block.popResource(this.level, stack.pos, stack.stack);
++            }
+         }
+     }
+ 
+diff --git a/net/minecraft/world/level/block/TntBlock.java b/net/minecraft/world/level/block/TntBlock.java
+index c27fc92d6ff9dd7e07a61513601ef73ff16cf842..1840df81b9e6162d046b0f9af9959003260b8063 100644
+--- a/net/minecraft/world/level/block/TntBlock.java
++++ b/net/minecraft/world/level/block/TntBlock.java
+@@ -75,7 +75,12 @@ public class TntBlock extends Block {
+     public void wasExploded(final ServerLevel level, final BlockPos pos, final Explosion explosion) {
+         if (level.getGameRules().get(GameRules.TNT_EXPLODES)) {
+             PrimedTnt primed = new PrimedTnt(level, pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, explosion.getIndirectSourceEntity());
+-            primed.setFuse(PrimedTnt.getRandomShortFuse(primed.getFuse(), level.getRandom()));
++            final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++            if (systemLinkSnapshot == null || !systemLinkSnapshot.gameplay().tnt().recodedMechanics().enabled() || systemLinkSnapshot.gameplay().tnt().randomizeExplosionChainFuse()) {
++                primed.setFuse(PrimedTnt.getRandomShortFuse(primed.getFuse(), level.getRandom()));
++            } else {
++                primed.setFuse(systemLinkSnapshot.gameplay().tnt().fuseTicks());
++            }
+             level.addFreshEntity(primed);
+         }
+     }

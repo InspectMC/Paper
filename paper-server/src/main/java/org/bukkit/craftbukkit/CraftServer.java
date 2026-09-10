@@ -984,6 +984,7 @@ public final class CraftServer implements Server {
         }
 
         org.spigotmc.SpigotConfig.init((File) this.console.options.valueOf("spigot-settings")); // Spigot
+        dev.systemlink.spigot.configuration.MSpigotConfig.init((File) this.console.options.valueOf("mspigot-settings")); // SystemLink
         this.console.paperConfigurations.reloadConfigs(this.console);
         for (ServerLevel world : this.console.getAllLevels()) {
             // world.serverLevelData.setDifficulty(config.difficulty); // Paper - per level difficulty
@@ -1015,6 +1016,7 @@ public final class CraftServer implements Server {
         // Paper end
         this.reloadData();
         org.spigotmc.SpigotConfig.registerCommands(); // Spigot
+        dev.systemlink.spigot.configuration.MSpigotConfig.registerCommands(); // SystemLink
         io.papermc.paper.command.PaperCommands.registerCommands(this.console); // Paper
         this.spark.registerCommandBeforePlugins(this); // Paper - spark
         this.overrideAllCommandBlockCommands = this.commandsConfiguration.getStringList("command-block-overrides").contains("*");
@@ -2748,6 +2750,13 @@ public final class CraftServer implements Server {
 
     public org.bukkit.Server.Spigot spigot() {
         return this.spigot;
+    }
+
+    private final dev.systemlink.spigot.MSpigot mspigot = new dev.systemlink.spigot.CraftMSpigot();
+
+    @Override
+    public dev.systemlink.spigot.MSpigot mspigot() {
+        return this.mspigot;
     }
 
     @Override

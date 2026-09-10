@@ -9,11 +9,13 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -53,6 +55,7 @@ public final class JavaPluginLoader implements PluginLoader {
     private final Pattern[] fileFilters = new Pattern[]{Pattern.compile("\\.jar$")};
     private final List<PluginClassLoader> loaders = new CopyOnWriteArrayList<PluginClassLoader>();
     private final LibraryLoader libraryLoader;
+    private static final Map<Class<?>, Set<Method>> M_SPIGOT_LISTENER_METHOD_CACHE = Collections.synchronizedMap(new WeakHashMap<>());
 
     /**
      * This class was not meant to be constructed explicitly
@@ -233,15 +236,7 @@ public final class JavaPluginLoader implements PluginLoader {
         Map<Class<? extends Event>, Set<RegisteredListener>> ret = new HashMap<>();
         Set<Method> methods;
         try {
-            Method[] publicMethods = listener.getClass().getMethods();
-            Method[] privateMethods = listener.getClass().getDeclaredMethods();
-            methods = new HashSet<>(publicMethods.length + privateMethods.length, 1.0f);
-            for (Method method : publicMethods) {
-                methods.add(method);
-            }
-            for (Method method : privateMethods) {
-                methods.add(method);
-            }
+            methods = getListenerMethods(listener.getClass());
         } catch (NoClassDefFoundError e) {
             plugin.getLogger().severe("Plugin " + plugin.getDescription().getFullName() + " has failed to register events for " + listener.getClass() + " because " + e.getMessage() + " does not exist.");
             return ret;
@@ -308,6 +303,33 @@ public final class JavaPluginLoader implements PluginLoader {
             eventSet.add(new RegisteredListener(listener, executor, eh.priority(), plugin, eh.ignoreCancelled()));
         }
         return ret;
+    }
+
+    private static Set<Method> getListenerMethods(final Class<?> listenerClass) {
+        if (!Boolean.parseBoolean(System.getProperty("mspigot.startup.self-inspection-cache.enabled", "true"))) {
+            return collectListenerMethods(listenerClass);
+        }
+        synchronized (M_SPIGOT_LISTENER_METHOD_CACHE) {
+            Set<Method> methods = M_SPIGOT_LISTENER_METHOD_CACHE.get(listenerClass);
+            if (methods == null) {
+                methods = collectListenerMethods(listenerClass);
+                M_SPIGOT_LISTENER_METHOD_CACHE.put(listenerClass, methods);
+            }
+            return methods;
+        }
+    }
+
+    private static Set<Method> collectListenerMethods(final Class<?> listenerClass) {
+        Method[] publicMethods = listenerClass.getMethods();
+        Method[] privateMethods = listenerClass.getDeclaredMethods();
+        Set<Method> methods = new HashSet<>(publicMethods.length + privateMethods.length, 1.0f);
+        for (Method method : publicMethods) {
+            methods.add(method);
+        }
+        for (Method method : privateMethods) {
+            methods.add(method);
+        }
+        return Set.copyOf(methods);
     }
 
     @Override

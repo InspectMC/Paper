@@ -1,0 +1,217 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 10:59:12 -0500
+Subject: [PATCH] Add SystemLink asynchronous player data I/O
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 879f53a64e3070aca5f6c58a0e200b62c3e51117..6fb4516d0df7ae90d386f13386fcff64f0a48520 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1036,6 +1036,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             this.playerList.saveAll();
+             this.playerList.removeAll(this.isRestarting); // Paper
+             this.getConnection().handleAllDisconnections(); // Paper
++            this.playerList.playerIo.flush(); // Paper - SystemLink async player data
+         }
+ 
+         LOGGER.info("Saving worlds");
+diff --git a/net/minecraft/server/network/config/PrepareSpawnTask.java b/net/minecraft/server/network/config/PrepareSpawnTask.java
+index f6601bc30fa37a309923ea9883b04233f83b2c0b..7af2c8f9e1244f34c3e9d7c489e1d2b554984f4b 100644
+--- a/net/minecraft/server/network/config/PrepareSpawnTask.java
++++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
+@@ -35,6 +35,8 @@ public class PrepareSpawnTask implements ConfigurationTask {
+     private final NameAndId nameAndId;
+     private final LevelLoadListener loadListener;
+     private PrepareSpawnTask.@Nullable State state;
++    private @Nullable CompletableFuture<Optional<net.minecraft.nbt.CompoundTag>> playerDataFuture; // Paper - SystemLink async player data
++    private Optional<net.minecraft.nbt.CompoundTag> loadedPlayerData = Optional.empty(); // Paper - SystemLink async player data
+ 
+     // Paper start - passthrough profile and packet listener
+     private final com.mojang.authlib.GameProfile profile;
+@@ -52,10 +54,14 @@ public class PrepareSpawnTask implements ConfigurationTask {
+ 
+     @Override
+     public void start(final Consumer<Packet<?>> connection) {
++        this.playerDataFuture = this.server.getPlayerList().loadPlayerDataAsync(this.nameAndId); // Paper - SystemLink async player data
++    }
++
++    // Paper start - SystemLink async player data
++    private void prepare(final Optional<net.minecraft.nbt.CompoundTag> loadedPlayerData) {
++        this.loadedPlayerData = loadedPlayerData;
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER)) {
+-            Optional<ValueInput> loadedData = this.server
+-                .getPlayerList()
+-                .loadPlayerData(this.nameAndId)
++            Optional<ValueInput> loadedData = loadedPlayerData
+                 .map(tag -> TagValueInput.create(reporter, this.server.registryAccess(), tag));
+             // Paper start - move logic in Entity to here, to use bukkit supplied world UUID & reset to main world spawn if no valid world is found
+             this.newPlayer = loadedData.isEmpty(); // New players don't have saved data!
+@@ -113,11 +119,20 @@ public class PrepareSpawnTask implements ConfigurationTask {
+             this.state = new PrepareSpawnTask.Preparing(spawnLevel, spawnPosition, spawnAngle);
+         }
+     }
++    // Paper end - SystemLink async player data
+ 
+     @Override
+     public boolean tick() {
+         return switch (this.state) {
+-            case null -> false;
++            // Paper start - SystemLink async player data
++            case null -> {
++                if (this.playerDataFuture != null && this.playerDataFuture.isDone()) {
++                    this.prepare(this.playerDataFuture.join());
++                    this.playerDataFuture = null;
++                }
++                yield false;
++            }
++            // Paper end - SystemLink async player data
+             case PrepareSpawnTask.Preparing preparing -> {
+                 PrepareSpawnTask.Ready ready = preparing.tick();
+                 if (ready != null) {
+@@ -147,6 +162,12 @@ public class PrepareSpawnTask implements ConfigurationTask {
+     }
+ 
+     public void close() {
++        // Paper start - SystemLink async player data
++        if (this.playerDataFuture != null) {
++            this.playerDataFuture.cancel(false);
++            this.playerDataFuture = null;
++        }
++        // Paper end - SystemLink async player data
+         if (this.state instanceof PrepareSpawnTask.Preparing preparing) {
+             preparing.cancel();
+         }
+@@ -283,9 +304,8 @@ public class PrepareSpawnTask implements ConfigurationTask {
+             PrepareSpawnTask.this.listener.paperConnection.applyPendingEntityId(player); // Paper - internal entity id api - possibly override player network id if plugins used internal API to configure it.
+ 
+             try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), PrepareSpawnTask.LOGGER)) {
+-                Optional<ValueInput> input = PrepareSpawnTask.this.server
+-                    .getPlayerList()
+-                    .loadPlayerData(PrepareSpawnTask.this.nameAndId)
++                // Paper start - SystemLink async player data; reuse the snapshot loaded while configuring
++                Optional<ValueInput> input = PrepareSpawnTask.this.loadedPlayerData
+                     // CraftBukkit start
+                     .map(tag -> {
+                         org.bukkit.craftbukkit.entity.CraftPlayer craftPlayer = player.getBukkitEntity();
+@@ -298,6 +318,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+                     })
+                     // CraftBukkit end
+                     .map(tag -> TagValueInput.create(reporter, PrepareSpawnTask.this.server.registryAccess(), tag));
++                // Paper end - SystemLink async player data
+                 input.ifPresent(player::load);
+                 // CraftBukkit start - Better rename detection
+                 if (input.isPresent()) {
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index baec5d072b8f2d9379dba850b04e881e5267ca6b..f45b2af7a03527a041d33398b6abca4ebff0d8d7 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -412,6 +412,17 @@ public abstract class PlayerList {
+         }
+     }
+ 
++    // Paper start - SystemLink async player data
++    public java.util.concurrent.CompletableFuture<Optional<CompoundTag>> loadPlayerDataAsync(final NameAndId nameAndId) {
++        final UUID lastSingleplayerOwnerUUID = this.server.getWorldData().getSinglePlayerUUID();
++        if (this.server.isSingleplayerOwner(nameAndId) && lastSingleplayerOwnerUUID != null) {
++            LOGGER.debug("loading single player asynchronously");
++            return this.playerIo.loadAsync(new NameAndId(lastSingleplayerOwnerUUID, "<singleplayer owner>"));
++        }
++        return this.playerIo.loadAsync(nameAndId);
++    }
++    // Paper end - SystemLink async player data
++
+     protected void save(final ServerPlayer player) {
+         if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
+         player.lastSave = MinecraftServer.currentTick; // Paper - Incremental chunk and player saving
+diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
+index eddb6ebe3fa50a818e54079b73ba117be0abd195..3364e4b0810c4f81963cd5a48b7baabd621030ab 100644
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -14,7 +14,6 @@ import net.minecraft.nbt.NbtIo;
+ import net.minecraft.nbt.NbtUtils;
+ import net.minecraft.server.players.NameAndId;
+ import net.minecraft.util.ProblemReporter;
+-import net.minecraft.util.Util;
+ import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.world.entity.player.Player;
+ import org.slf4j.Logger;
+@@ -22,12 +21,14 @@ import org.slf4j.Logger;
+ public class PlayerDataStorage {
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private final File playerDir;
++    private final dev.systemlink.spigot.playerdata.AsyncPlayerDataIO asyncIO; // Paper - SystemLink async player data
+     protected final DataFixer fixerUpper;
+ 
+     public PlayerDataStorage(final LevelStorageSource.LevelStorageAccess levelAccess, final DataFixer fixerUpper) {
+         this.fixerUpper = fixerUpper;
+         this.playerDir = levelAccess.getLevelPath(LevelResource.PLAYER_DATA_DIR).toFile();
+         this.playerDir.mkdirs();
++        this.asyncIO = new dev.systemlink.spigot.playerdata.AsyncPlayerDataIO(this.playerDir.toPath()); // Paper - SystemLink async player data
+     }
+ 
+     public void save(final Player player) {
+@@ -35,13 +36,16 @@ public class PlayerDataStorage {
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), LOGGER)) {
+             TagValueOutput output = TagValueOutput.createWithContext(reporter, player.registryAccess());
+             player.saveWithoutId(output);
+-            Path playerDirPath = this.playerDir.toPath();
+-            Path tmpFile = Files.createTempFile(playerDirPath, player.getStringUUID() + "-", ".dat");
+             CompoundTag dataToStore = output.buildResult();
+-            NbtIo.writeCompressed(dataToStore, tmpFile);
+-            Path realFile = playerDirPath.resolve(player.getStringUUID() + ".dat");
+-            Path oldFile = playerDirPath.resolve(player.getStringUUID() + ".dat_old");
+-            Util.safeReplaceFile(realFile, tmpFile, oldFile);
++            // Paper start - SystemLink async player data
++            final String uuid = player.getStringUUID();
++            final String playerName = player.getPlainTextName();
++            if (this.useAsyncIO()) {
++                this.asyncIO.saveAsync(uuid, playerName, dataToStore);
++            } else {
++                this.asyncIO.saveSync(uuid, playerName, dataToStore);
++            }
++            // Paper end - SystemLink async player data
+         } catch (Exception ignored) {
+             LOGGER.warn("Failed to save player data for {}", player.getPlainTextName(), ignored); // Paper - Print exception
+         }
+@@ -90,7 +94,7 @@ public class PlayerDataStorage {
+         return Optional.empty();
+     }
+ 
+-    public Optional<CompoundTag> load(final NameAndId nameAndId) {
++    private Optional<CompoundTag> loadFromDisk(final NameAndId nameAndId) { // Paper - SystemLink async player data
+         Optional<CompoundTag> optTag = this.load(nameAndId, ".dat");
+         if (optTag.isEmpty()) {
+             this.backup(nameAndId, ".dat");
+@@ -102,6 +106,31 @@ public class PlayerDataStorage {
+         });
+     }
+ 
++    // Paper start - SystemLink async player data
++    public Optional<CompoundTag> load(final NameAndId nameAndId) {
++        if (this.useAsyncIO()) {
++            this.asyncIO.flush();
++        }
++        return this.loadFromDisk(nameAndId);
++    }
++
++    public java.util.concurrent.CompletableFuture<Optional<CompoundTag>> loadAsync(final NameAndId nameAndId) {
++        if (!this.useAsyncIO()) {
++            return java.util.concurrent.CompletableFuture.completedFuture(this.loadFromDisk(nameAndId));
++        }
++        return this.asyncIO.loadAsync(() -> this.loadFromDisk(nameAndId));
++    }
++
++    public void flush() {
++        this.asyncIO.flush();
++    }
++
++    private boolean useAsyncIO() {
++        final io.papermc.paper.configuration.GlobalConfiguration configuration = io.papermc.paper.configuration.GlobalConfiguration.get();
++        return configuration != null && configuration.systemLink != null && configuration.systemLink.asyncPlayerData.enabled;
++    }
++    // Paper end - SystemLink async player data
++
+     // CraftBukkit start
+     public File getPlayerDir() {
+         return this.playerDir;

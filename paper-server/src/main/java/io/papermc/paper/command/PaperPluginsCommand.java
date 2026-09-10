@@ -172,6 +172,10 @@ public class PaperPluginsCommand {
 
     private int execute(CommandContext<CommandSourceStack> context) {
         final CommandSender sender = context.getSource().getSender();
+        if (dev.systemlink.spigot.configuration.MSpigotConfig.styledPluginListEnabled()) {
+            return executeMSpigotStyled(sender);
+        }
+
         final TreeMap<String, PluginProvider<JavaPlugin>> paperPlugins = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         final TreeMap<String, PluginProvider<JavaPlugin>> spigotPlugins = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
@@ -211,5 +215,43 @@ public class PaperPluginsCommand {
         }
 
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeMSpigotStyled(final CommandSender sender) {
+        final Plugin[] plugins = Bukkit.getPluginManager().getPlugins();
+        sender.sendMessage(Component.text("The server has ", NamedTextColor.WHITE)
+            .append(Component.text(plugins.length, NamedTextColor.GREEN))
+            .append(Component.text(plugins.length == 1 ? " plugin:" : " plugins:", NamedTextColor.WHITE)));
+
+        final TreeMap<String, Plugin> sorted = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (final Plugin plugin : plugins) {
+            sorted.put(plugin.getName(), plugin);
+        }
+        for (final Plugin plugin : sorted.values()) {
+            sender.sendMessage(formatMSpigotPlugin(plugin));
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static Component formatMSpigotPlugin(final Plugin plugin) {
+        final String version = plugin.getDescription().getVersion();
+        final Component hover = Component.text()
+            .append(Component.text(plugin.getName() + " ", plugin.isEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED))
+            .append(Component.text("(v" + version + ")", NamedTextColor.WHITE))
+            .append(Component.newline())
+            .append(Component.newline())
+            .append(Component.text(plugin.getDescription().getDescription() == null ? "No description." : plugin.getDescription().getDescription(), NamedTextColor.WHITE))
+            .append(Component.newline())
+            .append(Component.text("Authors: ", NamedTextColor.GRAY))
+            .append(Component.text(plugin.getDescription().getAuthors().isEmpty() ? "Unknown" : String.join(", ", plugin.getDescription().getAuthors()), NamedTextColor.WHITE))
+            .append(Component.newline())
+            .append(Component.text("Status: ", NamedTextColor.GRAY))
+            .append(Component.text(plugin.isEnabled() ? "Enabled" : "Disabled", plugin.isEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED))
+            .build();
+        return Component.text("✔ ", plugin.isEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED)
+            .append(Component.text(plugin.getName(), plugin.isEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED))
+            .append(Component.text(" (v" + version + ")", NamedTextColor.WHITE))
+            .hoverEvent(hover)
+            .clickEvent(ClickEvent.runCommand("/version " + plugin.getName()));
     }
 }

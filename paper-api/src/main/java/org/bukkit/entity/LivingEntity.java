@@ -1433,6 +1433,15 @@ public interface LivingEntity extends Attributable, Damageable, ProjectileSource
      * @param directionZ The relative z position of the knockback source direction
      */
     void knockback(double strength, double directionX, double directionZ);
+
+    /**
+     * Applies a custom SystemLink knockback specification to this entity.
+     * Mechanics such as knockback resistance are factored in and an entity
+     * knockback event is fired.
+     *
+     * @param knockback custom knockback specification
+     */
+    void knockback(@NotNull dev.systemlink.spigot.knockback.Knockback knockback);
     // Paper end - knockback API
 
     // Paper start - ItemStack damage API

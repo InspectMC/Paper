@@ -115,6 +115,12 @@ public class Main {
                         .defaultsTo(new File("spigot.yml"))
                         .describedAs("Yml file");
 
+                this.acceptsAll(asList("M", "mspigot-settings"), "File for mSpigot settings")
+                        .withRequiredArg()
+                        .ofType(File.class)
+                        .defaultsTo(new File("mSpigot.yml"))
+                        .describedAs("Yml file");
+
                 this.acceptsAll(asList("paper-dir", "paper-settings-directory"), "Directory for Paper settings")
                         .withRequiredArg()
                         .ofType(File.class)
@@ -153,6 +159,9 @@ public class Main {
             options = parser.parse(args);
         } catch (joptsimple.OptionException ex) {
             Logger.getLogger(Main.class.getName()).log(Level.SEVERE, ex.getLocalizedMessage());
+        }
+        if (options != null) {
+            dev.systemlink.spigot.configuration.MSpigotConfig.configureSparkServerConfigs((File) options.valueOf("mspigot-settings")); // mSpigot - include custom configs in spark reports
         }
 
         if ((options == null) || (options.has("?"))) {

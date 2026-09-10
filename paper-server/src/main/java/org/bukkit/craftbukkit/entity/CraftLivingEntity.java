@@ -1046,6 +1046,12 @@ public class CraftLivingEntity extends CraftEntity implements LivingEntity {
         this.getHandle().knockback(strength, directionX, directionZ, this.getHandle().damageSources().generic(), 0.0F); // todo - snapshot - api - expose damage source and/or damage
     }
 
+    @Override
+    public void knockback(final dev.systemlink.spigot.knockback.Knockback knockback) {
+        Preconditions.checkArgument(knockback != null, "Knockback specification must not be null");
+        this.getHandle().knockback(knockback, this.getHandle().damageSources().generic(), 0.0F);
+    }
+
     public void broadcastSlotBreak(final org.bukkit.inventory.EquipmentSlot slot) {
         this.getHandle().level().broadcastEntityEvent(this.getHandle(), net.minecraft.world.entity.LivingEntity.entityEventForEquipmentBreak(org.bukkit.craftbukkit.CraftEquipmentSlot.getNMS(slot)));
     }

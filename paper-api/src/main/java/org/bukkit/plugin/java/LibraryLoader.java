@@ -42,6 +42,7 @@ import org.jetbrains.annotations.Nullable;
 public class LibraryLoader {
 // Paper end
 
+    private static final String M_SPIGOT_LOCAL_POM_CACHE_PROPERTY = "mspigot.startup.local-pom-cache.enabled";
     private final Logger logger;
     private final RepositorySystem repository;
     private final DefaultRepositorySystemSession session;
@@ -49,7 +50,18 @@ public class LibraryLoader {
     public static java.util.function.BiFunction<URL[], ClassLoader, URLClassLoader> LIBRARY_LOADER_FACTORY; // Paper - bytecode rewriting hook
 
     private static List<RemoteRepository> getRepositories() {
-        return List.of(new RemoteRepository.Builder("central", "default", MavenLibraryResolver.MAVEN_CENTRAL_DEFAULT_MIRROR).build());
+        return List.of(mSpigotCacheOptimized(new RemoteRepository.Builder("central", "default", MavenLibraryResolver.MAVEN_CENTRAL_DEFAULT_MIRROR).build()));
+    }
+
+    private static RemoteRepository mSpigotCacheOptimized(final RemoteRepository repository) {
+        if (!Boolean.parseBoolean(System.getProperty(M_SPIGOT_LOCAL_POM_CACHE_PROPERTY, "true"))) {
+            return repository;
+        }
+        final RepositoryPolicy cached = new RepositoryPolicy(true, RepositoryPolicy.UPDATE_POLICY_NEVER, RepositoryPolicy.CHECKSUM_POLICY_FAIL);
+        return new RemoteRepository.Builder(repository)
+            .setReleasePolicy(cached)
+            .setSnapshotPolicy(cached)
+            .build();
     }
 
     public LibraryLoader(@NotNull Logger logger) {

@@ -269,7 +269,39 @@ public class BukkitBrigForwardingMap extends HashMap<String, Command> {
 
         @Override
         public Iterator<Entry<String, Command>> iterator() {
-            return this.entryStream().iterator();
+            // mSpigot start - legacy compatibility
+            // Some older command frameworks reflectively access SimpleCommandMap#knownCommands
+            // and prune entries with entrySet().iterator().remove(). A Stream iterator does
+            // not support remove(), while Spigot's old HashMap-backed command map did.
+            Iterator<CommandNode<CommandSourceStack>> iterator = new ArrayList<>(BukkitBrigForwardingMap.this.getDispatcher().getRoot().getChildren()).iterator();
+
+            return new Iterator<>() {
+
+                private CommandNode<CommandSourceStack> lastFetched;
+
+                @Override
+                public boolean hasNext() {
+                    return iterator.hasNext();
+                }
+
+                @Override
+                public Entry<String, Command> next() {
+                    this.lastFetched = iterator.next();
+                    return BukkitBrigForwardingMap.this.nodeToEntry(this.lastFetched);
+                }
+
+                @Override
+                public void remove() {
+                    if (this.lastFetched == null) {
+                        throw new IllegalStateException("next not yet called");
+                    }
+
+                    BukkitBrigForwardingMap.this.remove(this.lastFetched.getName());
+                    iterator.remove();
+                    this.lastFetched = null;
+                }
+            };
+            // mSpigot end - legacy compatibility
         }
 
         @Override

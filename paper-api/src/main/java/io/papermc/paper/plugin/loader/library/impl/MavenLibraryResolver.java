@@ -66,6 +66,7 @@ public class MavenLibraryResolver implements ClassPathLibrary {
         "http://repo.maven.apache.org/maven2"
     );
     private static final Logger LOGGER = LoggerFactory.getLogger("MavenLibraryResolver");
+    private static final String M_SPIGOT_LOCAL_POM_CACHE_PROPERTY = "mspigot.startup.local-pom-cache.enabled";
 
     private final RepositorySystem repository;
     private final DefaultRepositorySystemSession session;
@@ -126,7 +127,7 @@ public class MavenLibraryResolver implements ClassPathLibrary {
                 new RuntimeException("Plugin used Maven Central for library resolution (%s)".formatted(remoteRepository.toString()))
             );
         }
-        this.repositories.add(remoteRepository);
+        this.repositories.add(mSpigotCacheOptimized(remoteRepository));
     }
 
     /**
@@ -161,5 +162,16 @@ public class MavenLibraryResolver implements ClassPathLibrary {
             central = "https://maven-central.storage-download.googleapis.com/maven2";
         }
         return central;
+    }
+
+    private static RemoteRepository mSpigotCacheOptimized(final RemoteRepository repository) {
+        if (!Boolean.parseBoolean(System.getProperty(M_SPIGOT_LOCAL_POM_CACHE_PROPERTY, "true"))) {
+            return repository;
+        }
+        final RepositoryPolicy cached = new RepositoryPolicy(true, RepositoryPolicy.UPDATE_POLICY_NEVER, RepositoryPolicy.CHECKSUM_POLICY_FAIL);
+        return new RemoteRepository.Builder(repository)
+            .setReleasePolicy(cached)
+            .setSnapshotPolicy(cached)
+            .build();
     }
 }

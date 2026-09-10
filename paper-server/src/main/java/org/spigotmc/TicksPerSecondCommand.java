@@ -8,6 +8,7 @@ import net.kyori.adventure.text.format.TextColor;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import java.text.DecimalFormat;
+import dev.systemlink.spigot.diagnostics.MSpigotTpsGraph;
 
 import static net.kyori.adventure.text.Component.text;
 
@@ -35,6 +36,11 @@ public class TicksPerSecondCommand extends Command {
     @Override
     public boolean execute(CommandSender sender, String currentAlias, String[] args) {
         if (!this.testPermission(sender)) {
+            return true;
+        }
+
+        if (args.length > 0 && args[0].equalsIgnoreCase("graph")) {
+            MSpigotTpsGraph.sendGraph(sender);
             return true;
         }
 

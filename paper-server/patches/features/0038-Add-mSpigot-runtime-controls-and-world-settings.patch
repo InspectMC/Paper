@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 12:05:15 -0500
+Subject: [PATCH] Add mSpigot runtime controls and world settings
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 6fb4516d0df7ae90d386f13386fcff64f0a48520..c7ead495d1a0027e45a1cb2e38ddd55cc52b1506 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1661,6 +1661,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         this.server.spark.tickEnd(((double)(endTime - this.currentTickStart) / 1000000D)); // Paper - spark
+         profiler.push("tallying");
+         long tickTime = Util.getNanos() - nano;
++        dev.systemlink.spigot.diagnostics.LagSpikeDetector.recordTick(this.tickCount, tickTime); // Paper - SystemLink lag-spike detector
+         int tickIndex = this.tickCount % 100;
+         this.aggregatedTickTimesNanos = this.aggregatedTickTimesNanos - this.tickTimesNanos[tickIndex];
+         this.aggregatedTickTimesNanos += tickTime;
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index c2dd2da4bfb7d65ad2730ba1ce771e2b488beda4..95fdf7ffc483ae461275a8be82f1344ced772f08 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -809,6 +809,7 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+     @Override
+     protected final void serverAiStep() {
+         this.noActionTime++;
++        if (!dev.systemlink.spigot.entity.MobAIController.enabled()) return; // Paper - SystemLink runtime MobAI switch
+         // Paper start - Allow nerfed mobs to jump and float
+         if (!this.aware) {
+             if (this.goalFloat != null) {
+diff --git a/net/minecraft/world/level/block/SugarCaneBlock.java b/net/minecraft/world/level/block/SugarCaneBlock.java
+index 373a61d2d8e73f3bbfd5117c492a8d63bb574f54..7c2dce7e69729ad00f76fd292f2032954dd21d65 100644
+--- a/net/minecraft/world/level/block/SugarCaneBlock.java
++++ b/net/minecraft/world/level/block/SugarCaneBlock.java
+@@ -48,6 +48,8 @@ public class SugarCaneBlock extends Block {
+ 
+     @Override
+     protected void randomTick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.SugarCaneSettings sugarCane = dev.systemlink.spigot.configuration.MSpigotConfig.worldSettings(level.getWorld().getName()).sugarCane(); // Paper - SystemLink world configuration
++        if (!sugarCane.enabled()) return; // Paper - SystemLink world configuration
+         if (level.isEmptyBlock(pos.above())) {
+             int height = 1;
+ 
+@@ -55,13 +57,14 @@ public class SugarCaneBlock extends Block {
+                 height++;
+             }
+ 
+-            if (height < level.paperConfig().maxGrowthHeight.reeds) { // Paper - Configurable cactus/bamboo/reed growth height
++            final int maxHeight = sugarCane.maxHeight() < 0 ? level.paperConfig().maxGrowthHeight.reeds : sugarCane.maxHeight(); // Paper - SystemLink world configuration
++            if (height < maxHeight) { // Paper - Configurable cactus/bamboo/reed growth height // Paper - SystemLink world configuration
+                 int age = state.getValue(AGE);
+-                int modifier = level.spigotConfig.caneModifier; // Spigot - SPIGOT-7159: Better modifier resolution
+-                if (age >= 15 || (modifier != 100 && random.nextFloat() < (modifier / (100.0F * 16)))) { // Spigot - SPIGOT-7159: Better modifier resolution
++                float modifier = (float) (level.spigotConfig.caneModifier * sugarCane.growthMultiplier()); // Spigot - SPIGOT-7159: Better modifier resolution // Paper - SystemLink world configuration
++                if (age >= 15 || (modifier != 100.0F && random.nextFloat() < (modifier / (100.0F * 16)))) { // Spigot - SPIGOT-7159: Better modifier resolution
+                     org.bukkit.craftbukkit.event.CraftEventFactory.handleBlockGrowEvent(level, pos.above(), this.defaultBlockState(), Block.UPDATE_ALL); // CraftBukkit
+                     level.setBlock(pos, state.setValue(AGE, 0), Block.UPDATE_NONE);
+-                } else if (modifier == 100 || random.nextFloat() < (modifier / (100.0F * 16))) { // Spigot - SPIGOT-7159: Better modifier resolution
++                } else if (modifier == 100.0F || random.nextFloat() < (modifier / (100.0F * 16))) { // Spigot - SPIGOT-7159: Better modifier resolution
+                     level.setBlock(pos, state.setValue(AGE, age + 1), Block.UPDATE_NONE);
+                 }
+             }

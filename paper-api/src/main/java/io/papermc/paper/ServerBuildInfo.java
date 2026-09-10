@@ -18,6 +18,11 @@ public interface ServerBuildInfo {
     Key BRAND_PAPER_ID = Key.key("papermc", "paper");
 
     /**
+     * The brand id for mSpigot.
+     */
+    Key BRAND_MSPIGOT_ID = Key.key("systemlink", "mspigot");
+
+    /**
      * Gets the {@code ServerBuildInfo}.
      *
      * @return the {@code ServerBuildInfo}

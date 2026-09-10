@@ -184,6 +184,7 @@ val generateApiVersioningFile = tasks.register<GenerateApiVersioningFile>("gener
 }
 
 tasks.jar {
+    archiveFileName.set("mSpigot-API.jar")
     from(generateApiVersioningFile.flatMap { it.outputFile })
     manifest {
         attributes(

@@ -1542,6 +1542,23 @@ public class CraftEventFactory {
         Bukkit.getPluginManager().callEvent(event);
     }
 
+    // Paper start - Add SystemLink equipment set event
+    public static boolean callEquipmentSetEvent(net.minecraft.world.entity.LivingEntity entity, net.minecraft.world.entity.EquipmentSlot slot, ItemStack oldItem, ItemStack newItem) {
+        if (!Bukkit.isPrimaryThread()) {
+            return true;
+        }
+
+        final org.bukkit.event.inventory.EquipmentSetEvent event = new org.bukkit.event.inventory.EquipmentSetEvent(
+            (LivingEntity) entity.getBukkitEntity(),
+            CraftEquipmentSlot.getSlot(slot),
+            CraftItemStack.asBukkitCopy(oldItem),
+            CraftItemStack.asBukkitCopy(newItem)
+        );
+        Bukkit.getPluginManager().callEvent(event);
+        return !event.isCancelled();
+    }
+    // Paper end - Add SystemLink equipment set event
+
     public static BlockIgniteEvent callBlockIgniteEvent(Level level, BlockPos pos, BlockPos sourcePos) {
         Block igniter = CraftBlock.at(level, sourcePos);
         final IgniteCause cause;
@@ -1910,9 +1927,73 @@ public class CraftEventFactory {
 
         EntityPotionEffectEvent event = new EntityPotionEffectEvent((LivingEntity) entity.getBukkitEntity(), bukkitOldEffect, bukkitNewEffect, Optionull.map(source, Entity::getBukkitEntity), cause, knownAction != null ? knownAction : computeEffectAction(oldEffect, newEffect), willOverride);
         Bukkit.getPluginManager().callEvent(event);
+        // Paper start - Add SystemLink potion effect events
+        if (!event.isCancelled()) {
+            CraftEventFactory.callSystemLinkPotionEffectEvent(entity, oldEffect, newEffect, source, cause, event);
+        }
+        // Paper end - Add SystemLink potion effect events
 
         return event;
     }
+
+    // Paper start - Add SystemLink potion effect events
+    private static void callSystemLinkPotionEffectEvent(
+        net.minecraft.world.entity.LivingEntity entity,
+        @Nullable MobEffectInstance oldEffect,
+        @Nullable MobEffectInstance newEffect,
+        @Nullable net.minecraft.world.entity.Entity source,
+        EntityPotionEffectEvent.Cause cause,
+        EntityPotionEffectEvent event
+    ) {
+        final LivingEntity bukkitEntity = (LivingEntity) entity.getBukkitEntity();
+        if (newEffect != null) {
+            final org.bukkit.event.entity.PotionEffectAddEvent.EffectCause addCause = CraftEventFactory.toSystemLinkPotionEffectCause(cause, source);
+            final org.bukkit.event.entity.PotionEffectAddEvent addEvent = oldEffect == null
+                ? new org.bukkit.event.entity.PotionEffectAddEvent(bukkitEntity, CraftPotionUtil.toBukkit(newEffect), addCause)
+                : new org.bukkit.event.entity.PotionEffectExtendEvent(bukkitEntity, CraftPotionUtil.toBukkit(oldEffect), CraftPotionUtil.toBukkit(newEffect), addCause);
+            Bukkit.getPluginManager().callEvent(addEvent);
+            event.setCancelled(addEvent.isCancelled());
+            return;
+        }
+
+        final org.bukkit.potion.PotionEffect removedEffect = CraftPotionUtil.toBukkit(oldEffect);
+        final org.bukkit.event.entity.PotionEffectRemoveEvent removeEvent = cause == EntityPotionEffectEvent.Cause.EXPIRATION
+            ? new org.bukkit.event.entity.PotionEffectExpireEvent(bukkitEntity, removedEffect, oldEffect.getDuration())
+            : new org.bukkit.event.entity.PotionEffectRemoveEvent(bukkitEntity, removedEffect);
+        Bukkit.getPluginManager().callEvent(removeEvent);
+        event.setCancelled(removeEvent.isCancelled());
+        if (removeEvent instanceof org.bukkit.event.entity.PotionEffectExpireEvent expireEvent && expireEvent.getDuration() > 0) {
+            oldEffect.setDuration(expireEvent.getDuration());
+            event.setCancelled(true);
+        }
+    }
+
+    private static org.bukkit.event.entity.PotionEffectAddEvent.EffectCause toSystemLinkPotionEffectCause(
+        final EntityPotionEffectEvent.Cause cause,
+        final @Nullable net.minecraft.world.entity.Entity source
+    ) {
+        return switch (cause) {
+            case POTION_SPLASH -> org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.POTION_SPLASH;
+            case BEACON -> org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.BEACON;
+            case PLUGIN, COMMAND -> org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.PLUGIN;
+            case VILLAGER_TRADE -> org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.VILLAGE_TRADE;
+            case CONVERSION -> org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.ZOMBIE_CONVERTED;
+            case ATTACK -> {
+                if (source instanceof net.minecraft.world.entity.monster.spider.CaveSpider) {
+                    yield org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.CAVE_SPIDER;
+                }
+                if (source instanceof net.minecraft.world.entity.monster.skeleton.WitherSkeleton) {
+                    yield org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.WITHER_SKELETON;
+                }
+                if (source instanceof net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull) {
+                    yield org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.WITHER_SKULL;
+                }
+                yield org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.UNKNOWN;
+            }
+            default -> org.bukkit.event.entity.PotionEffectAddEvent.EffectCause.UNKNOWN;
+        };
+    }
+    // Paper end - Add SystemLink potion effect events
 
     public static boolean handleBlockFormEvent(Level level, BlockPos pos, net.minecraft.world.level.block.state.BlockState state, @net.minecraft.world.level.block.Block.UpdateFlags int flags) {
         return CraftEventFactory.handleBlockFormEvent(level, pos, state, flags, null);

@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 14:29:28 -0500
+Subject: [PATCH] Add SystemLink packet movement and event hooks
+
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index 9fbc7e93712672dbab67f931e2aee447d803607b..5b49c6105c54822f7a097c1ee5b99b1ff4985f7d 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -268,6 +268,12 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+             }
+             // Paper end - packet limiter
+             if (packetListener.shouldHandleMessage(packet)) {
++                // Paper start - Add SystemLink packet handlers
++                final net.minecraft.server.level.ServerPlayer systemLinkPlayer = this.getPlayer();
++                if (systemLinkPlayer != null && !net.minecraft.server.MinecraftServer.getServer().server.mspigot().getPacketService().callPacket(systemLinkPlayer.getBukkitEntity(), packet, dev.systemlink.spigot.packet.PacketDirection.RECEIVED)) {
++                    return;
++                }
++                // Paper end - Add SystemLink packet handlers
+                 try {
+                     genericsFtw(packet, packetListener);
+                 } catch (RunningOnDifferentThreadException var5) {
+@@ -483,6 +489,13 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     // Paper end - Add netty task scheduling helper
+ 
+     private void sendPacket(final Packet<?> packet, final @Nullable ChannelFutureListener listener, final boolean flush) {
++        // Paper start - Add SystemLink packet handlers
++        final net.minecraft.server.level.ServerPlayer systemLinkPlayer = this.getPlayer();
++        if (systemLinkPlayer != null && !net.minecraft.server.MinecraftServer.getServer().server.mspigot().getPacketService().callPacket(systemLinkPlayer.getBukkitEntity(), packet, dev.systemlink.spigot.packet.PacketDirection.SENT)) {
++            packet.onPacketDispatchFinish(systemLinkPlayer, null);
++            return;
++        }
++        // Paper end - Add SystemLink packet handlers
+         this.sentPackets++;
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.doSendPacket(packet, listener, flush);
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index c2aba28916da7f8b0bc8a325cddaa9bb7ecfb251..4b466061fb3862e325633d01f33a0b7fd811c2ea 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -873,7 +873,7 @@ public class ServerGamePacketListenerImpl
+         }
+ 
+         // Paper start - AsyncTabCompleteEvent
+-        final com.destroystokyo.paper.event.server.AsyncTabCompleteEvent event = new com.destroystokyo.paper.event.server.AsyncTabCompleteEvent(this.getCraftPlayer(), packet.getCommand(), true, null);
++        final com.destroystokyo.paper.event.server.AsyncTabCompleteEvent event = new org.bukkit.event.server.AsyncTabCompleteEvent(this.getCraftPlayer(), packet.getCommand(), true, null);
+         event.callEvent();
+         final List<com.destroystokyo.paper.event.server.AsyncTabCompleteEvent.Completion> completions = event.isCancelled() ? com.google.common.collect.ImmutableList.of() : event.completions();
+         // If the event isn't handled, we can assume that we have no completions, and so we'll ask the server
+@@ -1483,6 +1483,28 @@ public class ServerGamePacketListenerImpl
+                         double targetX = clampHorizontal(packet.getX(this.player.getX()));
+                         double targetY = clampVertical(packet.getY(this.player.getY()));
+                         double targetZ = clampHorizontal(packet.getZ(this.player.getZ()));
++                        // Paper start - Add SystemLink movement handlers
++                        final org.bukkit.entity.Player systemLinkPlayer = this.getCraftPlayer();
++                        final org.bukkit.Location systemLinkFrom = new org.bukkit.Location(systemLinkPlayer.getWorld(), this.player.getX(), this.player.getY(), this.player.getZ(), this.player.getYRot(), this.player.getXRot());
++                        final org.bukkit.Location systemLinkTo = new org.bukkit.Location(systemLinkPlayer.getWorld(), targetX, targetY, targetZ, targetYRot, targetXRot);
++                        final dev.systemlink.spigot.movement.MovementService systemLinkMovementService = this.server.server.mspigot().getMovementService();
++                        boolean systemLinkWasJustTeleported = this.justTeleported;
++                        if (packet.hasPosition() && !systemLinkMovementService.callMovement(systemLinkPlayer, dev.systemlink.spigot.movement.MovementType.LOCATION, systemLinkFrom, systemLinkTo, packet)) {
++                            this.internalTeleport(systemLinkFrom);
++                            return;
++                        }
++                        if (!systemLinkWasJustTeleported && this.justTeleported) {
++                            return;
++                        }
++                        systemLinkWasJustTeleported = this.justTeleported;
++                        if (packet.hasRotation() && !systemLinkMovementService.callMovement(systemLinkPlayer, dev.systemlink.spigot.movement.MovementType.ROTATION, systemLinkFrom, systemLinkTo, packet)) {
++                            this.internalTeleport(systemLinkFrom);
++                            return;
++                        }
++                        if (!systemLinkWasJustTeleported && this.justTeleported) {
++                            return;
++                        }
++                        // Paper end - Add SystemLink movement handlers
+                         if (this.player.isPassenger()) {
+                             this.player.absSnapTo(this.player.getX(), this.player.getY(), this.player.getZ(), targetYRot, targetXRot);
+                             this.player.level().getChunkSource().move(this.player);
+diff --git a/net/minecraft/world/effect/MobEffectInstance.java b/net/minecraft/world/effect/MobEffectInstance.java
+index 5dd64fb6e88629c7cc9f110842d1825365113b3b..c5d59b123f2d8decf6343c42a60a650da563c89e 100644
+--- a/net/minecraft/world/effect/MobEffectInstance.java
++++ b/net/minecraft/world/effect/MobEffectInstance.java
+@@ -205,6 +205,12 @@ public class MobEffectInstance implements Comparable<MobEffectInstance> {
+         return this.duration;
+     }
+ 
++    // Paper start - Add SystemLink potion effect events
++    public void setDuration(final int duration) {
++        this.duration = duration;
++    }
++    // Paper end - Add SystemLink potion effect events
++
+     public int getAmplifier() {
+         return this.amplifier;
+     }
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index a3a11047c66653e89444e6b435f4aca8553ecb5b..bfdcaf877240919a868f8064a7c9bfba24359ed3 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -2936,7 +2936,13 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     public void setItemSlot(final EquipmentSlot slot, final ItemStack itemStack, final boolean silent) {
++        // Paper start - Add SystemLink equipment set event
++        final ItemStack oldStack = this.equipment.get(slot);
++        if (!ItemStack.isSameItemSameComponents(oldStack, itemStack) && !org.bukkit.craftbukkit.event.CraftEventFactory.callEquipmentSetEvent(this, slot, oldStack, itemStack)) {
++            return;
++        }
+         this.onEquipItem(slot, this.equipment.set(slot, itemStack), itemStack, silent);
++        // Paper end - Add SystemLink equipment set event
+         // Paper end
+     }
+ 
+diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+index 8d3c6abd387acc4cec27a33b96bcd24255fd01ac..1ef54320e7d47053f4d8be6851ba341ef7986cbe 100644
+--- a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
++++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+@@ -111,6 +111,12 @@ public class ThrownEnderpearl extends ThrowableItemProjectile {
+                         ServerPlayer newOwner = player.teleport(new TeleportTransition(
+                             level, teleportPos, Vec3.ZERO, 0.0F, 0.0F, Relative.union(Relative.ROTATION, Relative.DELTA), TeleportTransition.DO_NOTHING).withCause(org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.ENDER_PEARL));
+                         if (newOwner == null) {
++                            // Paper start - Add SystemLink pearl refund event
++                            final org.bukkit.event.player.PlayerPearlRefundEvent event = new org.bukkit.event.player.PlayerPearlRefundEvent(player.getBukkitEntity(), (org.bukkit.entity.EnderPearl) this.getBukkitEntity());
++                            if (event.callEvent()) {
++                                player.getInventory().placeItemBackInInventory(new ItemStack(Items.ENDER_PEARL));
++                            }
++                            // Paper end - Add SystemLink pearl refund event
+                             this.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.HIT);
+                             return;
+                         }
+diff --git a/net/minecraft/world/inventory/ArmorSlot.java b/net/minecraft/world/inventory/ArmorSlot.java
+index d3495bcdb4985005ae903ee26853542db06584a6..446fb6381164f785c15511586111d19ce301ac3e 100644
+--- a/net/minecraft/world/inventory/ArmorSlot.java
++++ b/net/minecraft/world/inventory/ArmorSlot.java
+@@ -32,6 +32,11 @@ public class ArmorSlot extends Slot {
+ 
+     @Override
+     public void setByPlayer(final ItemStack itemStack, final ItemStack previous) {
++        // Paper start - Add SystemLink equipment set event
++        if (!ItemStack.isSameItemSameComponents(previous, itemStack) && !org.bukkit.craftbukkit.event.CraftEventFactory.callEquipmentSetEvent(this.owner, this.slot, previous, itemStack)) {
++            return;
++        }
++        // Paper end - Add SystemLink equipment set event
+         this.owner.onEquipItem(this.slot, previous, itemStack);
+         super.setByPlayer(itemStack, previous);
+     }
+diff --git a/net/minecraft/world/inventory/InventoryMenu.java b/net/minecraft/world/inventory/InventoryMenu.java
+index 10aa3b1cd8fe19af1ab88a93bd4e8f104b8e4219..8f18040fd7d63610c52ae116153a5aeab2f4ba02 100644
+--- a/net/minecraft/world/inventory/InventoryMenu.java
++++ b/net/minecraft/world/inventory/InventoryMenu.java
+@@ -66,6 +66,11 @@ public class InventoryMenu extends AbstractCraftingMenu {
+         this.addSlot(new Slot(inventory, 40, 77, 62) {
+             @Override
+             public void setByPlayer(final ItemStack itemStack, final ItemStack previous) {
++                // Paper start - Add SystemLink equipment set event
++                if (!ItemStack.isSameItemSameComponents(previous, itemStack) && !org.bukkit.craftbukkit.event.CraftEventFactory.callEquipmentSetEvent(owner, EquipmentSlot.OFFHAND, previous, itemStack)) {
++                    return;
++                }
++                // Paper end - Add SystemLink equipment set event
+                 owner.onEquipItem(EquipmentSlot.OFFHAND, previous, itemStack);
+                 super.setByPlayer(itemStack, previous);
+             }

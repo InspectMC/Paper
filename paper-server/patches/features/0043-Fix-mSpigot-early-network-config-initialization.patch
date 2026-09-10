@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Mon, 7 Sep 2026 09:07:45 -0500
+Subject: [PATCH] Fix mSpigot early network config initialization
+
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index 860bdd121fdd227630b589b6c9fa8a49e129dbd2..d33a350786c999c7f665c4f275dc333f504d8117 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -111,6 +111,10 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     public static void setExplicitFlushEnabled(final boolean enabled) {
+         enableExplicitFlush = enabled;
+     }
++
++    private static boolean explicitFlushEnabled() {
++        return enableExplicitFlush || Boolean.getBoolean("mspigot.networking.explicit-flush");
++    }
+     // Paper end - add utility methods
+     // Paper start - packet limiter
+     protected final Object PACKET_LIMIT_LOCK = new Object();
+@@ -688,7 +692,7 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         }
+ 
+         if (this.channel != null) {
+-            if (enableExplicitFlush) this.channel.eventLoop().execute(() -> this.channel.flush()); // Paper - Disable explicit connection flushing; we don't need to explicit flush here, but allow opt in incase issues are found to a better version
++            if (explicitFlushEnabled()) this.channel.eventLoop().execute(() -> this.channel.flush()); // Paper - Disable explicit connection flushing; we don't need to explicit flush here, but allow opt in incase issues are found to a better version
+         }
+ 
+         if (this.tickCount++ % 20 == 0) {

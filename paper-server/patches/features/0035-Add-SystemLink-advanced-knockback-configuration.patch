@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 10:31:04 -0500
+Subject: [PATCH] Add SystemLink advanced knockback configuration
+
+
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 3a4da514c163e7565fc241835db52c464a5c4734..784af721cf4dff2175a5182526c1f57fe2fde7c1 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -1580,7 +1580,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         }
+         // Paper end - Check distance in entity interactions
+ 
+-        this.knockback(0.4F, xd, zd, source, damage, source.getDirectEntity(), source.getDirectEntity() == null ? io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.DAMAGE : io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.ENTITY_ATTACK); // CraftBukkit // Paper - knockback events
++        // Paper start - Add SystemLink advanced knockback configuration
++        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
++        final double baseKnockback = knockbackProfile.enabled ? knockbackProfile.baseKnockback : 0.4F;
++        this.knockback(baseKnockback, xd, zd, source, damage, source.getDirectEntity(), source.getDirectEntity() == null ? io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.DAMAGE : io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.ENTITY_ATTACK); // CraftBukkit // Paper - knockback events
++        // Paper end - Add SystemLink advanced knockback configuration
+         if (!blocked) {
+             this.indicateDamage(xd, zd);
+         }
+@@ -1734,7 +1738,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     protected void blockedByItem(final LivingEntity defender, final DamageSource source, final float damage) {
+-        defender.knockback(0.5, defender.getX() - this.getX(), defender.getZ() - this.getZ(), source, damage, this, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.SHIELD_BLOCK); // CraftBukkit // Paper - fix attacker & knockback events
++        // Paper start - Add SystemLink advanced knockback configuration
++        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
++        final double shieldKnockback = knockbackProfile.enabled ? knockbackProfile.shieldHitKnockback : 0.5;
++        defender.knockback(shieldKnockback, defender.getX() - this.getX(), defender.getZ() - this.getZ(), source, damage, this, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.SHIELD_BLOCK); // CraftBukkit // Paper - fix attacker & knockback events
++        // Paper end - Add SystemLink advanced knockback configuration
+     }
+ 
+     private boolean checkTotemDeathProtection(final DamageSource killingDamage) {
+@@ -2057,7 +2065,20 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     public void knockback(double power, double xd, double zd, final DamageSource source, final float damage, final boolean comesFromEffect, @Nullable Entity attacker, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause eventCause) { // Paper - knockback events
+-        power *= 1.0 - this.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE);
++        this.knockback(power, xd, zd, source, damage, comesFromEffect, attacker, eventCause, null); // Paper - Add SystemLink KnockbackBuilder API
++    }
++
++    // Paper start - Add SystemLink KnockbackBuilder API
++    private void knockback(double power, double xd, double zd, final DamageSource source, final float damage, final boolean comesFromEffect, @Nullable Entity attacker, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause eventCause, dev.systemlink.spigot.knockback.@Nullable Knockback customKnockback) {
++    // Paper end - Add SystemLink KnockbackBuilder API
++        // Paper start - Add SystemLink advanced knockback configuration
++        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
++        power = customKnockback != null
++            ? customKnockback.applyResistance(this.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE))
++            : knockbackProfile.enabled
++            ? knockbackProfile.applyResistance(power, this.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE))
++            : power * (1.0 - this.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE));
++        // Paper end - Add SystemLink advanced knockback configuration
+         if (true || !(power <= 0.0)) { // CraftBukkit - Call event even when force is 0
+             // this.needsSync = true; // Paper - moved down
+             Vec3 deltaMovement = this.getDeltaMovement();
+@@ -2070,7 +2091,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             Vec3 deltaVector = new Vec3(xd, 0.0, zd).normalize().scale(power);
+             Vec3 targetMovement = new Vec3( // Paper - knockback events
+                 deltaMovement.x / 2.0 - deltaVector.x,
+-                this.onGround() ? Math.min(0.4, deltaMovement.y / 2.0 + power) : deltaMovement.y,
++                customKnockback != null
++                    ? customKnockback.verticalVelocity(deltaMovement.y, power, this.onGround())
++                    : knockbackProfile.enabled
++                    ? knockbackProfile.verticalVelocity(deltaMovement.y, power, this.onGround())
++                    : this.onGround() ? Math.min(0.4, deltaMovement.y / 2.0 + power) : deltaMovement.y, // Paper - Add SystemLink advanced knockback configuration
+                 deltaMovement.z / 2.0 - deltaVector.z
+             );
+             // Paper start - knockback events
+@@ -2086,6 +2111,12 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         }
+     }
+ 
++    // Paper start - Add SystemLink KnockbackBuilder API
++    public void knockback(final dev.systemlink.spigot.knockback.Knockback knockback, final DamageSource source, final float damage) {
++        this.knockback(knockback.strength(), knockback.directionX(), knockback.directionZ(), source, damage, false, null, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.UNKNOWN, knockback);
++    }
++    // Paper end - Add SystemLink KnockbackBuilder API
++
+     public void knockback(final double power, final double xd, final double zd, final DamageSource source, final float damage) {
+         // Paper start - knockback events
+         this.knockback(power, xd, zd, source, damage, null, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.UNKNOWN);
+diff --git a/net/minecraft/world/entity/player/Player.java b/net/minecraft/world/entity/player/Player.java
+index 2a71a2fa949b3a7fb8ff2c44ec3a3d8636237142..8c182afda34a0c4f70a33a8a294ceaffad21b0c4 100644
+--- a/net/minecraft/world/entity/player/Player.java
++++ b/net/minecraft/world/entity/player/Player.java
+@@ -1033,6 +1033,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+             ItemStack attackingItemStack = this.getWeaponItem();
+             DamageSource damageSource = this.createAttackSource(attackingItemStack); final DamageSource dmgSourceFinal = damageSource; // Paper - damage events
+             float attackStrengthScale = this.getAttackStrengthScale(0.5F);
++            final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback; // Paper - Add SystemLink advanced knockback configuration
+             float magicBoost = attackStrengthScale * (this.getEnchantedDamage(entity, baseDamage, damageSource) - baseDamage);
+             baseDamage *= this.baseDamageScaleFactor();
+             this.onAttack(entity); // Paper
+@@ -1041,7 +1042,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+                 if (baseDamage > 0.0F || magicBoost > 0.0F) {
+                     boolean fullStrengthAttack = attackStrengthScale > 0.9F;
+                     boolean knockbackAttack;
+-                    if (this.isSprinting() && fullStrengthAttack) {
++                    if (this.isSprinting() && (knockbackProfile.enabled ? knockbackProfile.allowsSprintKnockback(fullStrengthAttack) : fullStrengthAttack)) { // Paper - Add SystemLink advanced knockback configuration
+                         this.playServerSideSound(SoundEvents.PLAYER_ATTACK_KNOCKBACK);
+                         knockbackAttack = true;
+                     } else {
+@@ -1067,7 +1068,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+                     boolean wasHurt = entity.hurtOrSimulate(damageSource, totalDamage);
+                     if (wasHurt) {
+                         this.causeExtraKnockback(
+-                            entity, this.getKnockback(entity, damageSource) + (knockbackAttack ? 0.5F : 0.0F), oldMovement, damageSource, totalDamage, true
++                            entity, this.getKnockback(entity, damageSource) + (knockbackAttack ? (float)(knockbackProfile.enabled ? knockbackProfile.extraKnockback : 0.5F) : 0.0F), oldMovement, damageSource, totalDamage, true // Paper - Add SystemLink advanced knockback configuration
+                         );
+                         if (sweepAttack) {
+                             this.doSweepAttack(entity, baseDamage, damageSource, attackStrengthScale);
+@@ -1272,9 +1273,12 @@ public abstract class Player extends Avatar implements ContainerUser {
+                     nearby.lastDamageCancelled = false;
+                     if (nearby.hurtServer(serverLevel, damageSource.knownCause(org.bukkit.event.entity.EntityDamageEvent.DamageCause.ENTITY_SWEEP_ATTACK), enchantedDamage) && !nearby.lastDamageCancelled) {
+                         // Paper end - Only apply knockback if the event is not canceled
++                        // Paper start - Add SystemLink advanced knockback configuration
++                        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
+                         nearby.knockback(
+-                            0.4F, Mth.sin(this.getYRot() * Mth.DEG_TO_RAD), -Mth.cos(this.getYRot() * Mth.DEG_TO_RAD), damageSource, enchantedDamage, this, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.SWEEP_ATTACK // Paper - knockback events
++                            knockbackProfile.enabled ? knockbackProfile.sweepingEdgeKnockback : 0.4F, Mth.sin(this.getYRot() * Mth.DEG_TO_RAD), -Mth.cos(this.getYRot() * Mth.DEG_TO_RAD), damageSource, enchantedDamage, this, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.SWEEP_ATTACK // Paper - knockback events
+                         );
++                        // Paper end - Add SystemLink advanced knockback configuration
+                         EnchantmentHelper.doPostAttackEffects(serverLevel, nearby, damageSource);
+                     }
+                 }

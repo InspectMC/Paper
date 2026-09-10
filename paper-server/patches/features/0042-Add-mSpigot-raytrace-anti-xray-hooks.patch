@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 20:43:34 -0500
+Subject: [PATCH] Add mSpigot raytrace anti-xray hooks
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index c83e66079e5d976e60db001fca936568a953c230..34a8e51359002ea0593369e074ec9a7851c27b2d 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1616,6 +1616,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
+         this.server.spark.tickStart(); // Paper - spark
+         new com.destroystokyo.paper.event.server.ServerTickStartEvent(this.tickCount+1).callEvent(); // Paper - Server Tick Events
++        new org.bukkit.event.server.ServerTickStartEvent(this.tickCount + 1).callEvent(); // mSpigot - Bukkit server tick events
+         this.tickCount++;
+         this.tickRateManager.tick();
+         this.tickChildren(haveTime);
+@@ -1653,10 +1654,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
+         ProfilerFiller profiler = Profiler.get();
+         this.server.spark.executeMainThreadTasks(); // Paper - spark
++        dev.systemlink.spigot.security.RaytraceAntiXray.tick(this); // mSpigot - dynamic raytrace anti-xray
+         // Paper start - Server Tick Events
+         long endTime = System.nanoTime();
+         long remaining = this.nextTickTimeNanos - endTime;
+         new com.destroystokyo.paper.event.server.ServerTickEndEvent(this.tickCount, ((double)(endTime - this.currentTickStart) / 1000000D), remaining).callEvent();
++        new org.bukkit.event.server.ServerTickEndEvent(this.tickCount, ((double)(endTime - this.currentTickStart) / 1000000D), remaining).callEvent(); // mSpigot - Bukkit server tick events
+         // Paper end - Server Tick Events
+         this.server.spark.tickEnd(((double)(endTime - this.currentTickStart) / 1000000D)); // Paper - spark
+         profiler.push("tallying");
+diff --git a/net/minecraft/server/level/ServerPlayerGameMode.java b/net/minecraft/server/level/ServerPlayerGameMode.java
+index 27bdb82793250b33b457fe027c003948000857c9..5b577697b0d69370acce2efd6b47b6bd2d39c0de 100644
+--- a/net/minecraft/server/level/ServerPlayerGameMode.java
++++ b/net/minecraft/server/level/ServerPlayerGameMode.java
+@@ -436,6 +436,10 @@ public class ServerPlayerGameMode {
+         // Paper end - Trigger bee_nest_destroyed trigger in the correct place
+         // CraftBukkit end
+ 
++        if (changed) {
++            dev.systemlink.spigot.security.RaytraceAntiXray.onBlockMined(this.player, this.level, pos); // mSpigot - dynamic raytrace anti-xray
++        }
++
+         return true;
+     }
+ 

@@ -37,13 +37,19 @@ public class SpigotCommand extends Command {
 
         MinecraftServer console = MinecraftServer.getServer();
         org.spigotmc.SpigotConfig.init((File) console.options.valueOf("spigot-settings"));
+        try {
+            dev.systemlink.spigot.configuration.MSpigotConfig.reload();
+        } catch (final IllegalStateException exception) {
+            sender.sendMessage(text("Could not reload mSpigot configuration: " + exception.getMessage(), NamedTextColor.RED));
+            return true;
+        }
         for (ServerLevel world : console.getAllLevels()) {
             world.spigotConfig.init();
         }
         console.server.reloadCount++;
 
-        Command.broadcastCommandMessage(sender, text("Reload complete.", NamedTextColor.GREEN));
-        
+        Command.broadcastCommandMessage(sender, text("Reloaded Spigot, mSpigot.yml, and knockback.yml.", NamedTextColor.GREEN));
+
 
         return true;
     }

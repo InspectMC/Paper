@@ -1,0 +1,1082 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 15:21:52 -0500
+Subject: [PATCH] Add mSpigot startup security and optimization hooks
+
+
+diff --git a/net/minecraft/network/Connection.java b/net/minecraft/network/Connection.java
+index 5b49c6105c54822f7a097c1ee5b99b1ff4985f7d..860bdd121fdd227630b589b6c9fa8a49e129dbd2 100644
+--- a/net/minecraft/network/Connection.java
++++ b/net/minecraft/network/Connection.java
+@@ -93,6 +93,11 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+     public java.net.InetSocketAddress virtualHost;
+     private static boolean enableExplicitFlush = Boolean.getBoolean("paper.explicit-flush"); // Paper - Disable explicit connection flushing
+     // Paper end
++    // mSpigot start - packet flood protection
++    private long systemLinkPacketFloodWindowStart;
++    private int systemLinkPacketFloodWindowCount;
++    private boolean systemLinkPacketFloodLogged;
++    // mSpigot end - packet flood protection
+     // Paper start - add utility methods
+     public final net.minecraft.server.level.ServerPlayer getPlayer() {
+         if (this.packetListener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl impl) {
+@@ -102,6 +107,10 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         }
+         return null;
+     }
++
++    public static void setExplicitFlushEnabled(final boolean enabled) {
++        enableExplicitFlush = enabled;
++    }
+     // Paper end - add utility methods
+     // Paper start - packet limiter
+     protected final Object PACKET_LIMIT_LOCK = new Object();
+@@ -222,6 +231,14 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+             if (this.stopReadingPackets) {
+                 return;
+             }
++            // mSpigot start - security prefilter
++            if (this.systemLinkPacketFlood(packet)) {
++                return;
++            }
++            if (!dev.systemlink.spigot.security.MSpigotSecurity.handleInboundPacket(this, packet)) {
++                return;
++            }
++            // mSpigot end - security prefilter
+             if (this.allPacketCounts != null ||
+                 io.papermc.paper.configuration.GlobalConfiguration.get().packetLimiter.overrides.containsKey(packet.getClass())) {
+                 long time = System.nanoTime();
+@@ -290,6 +307,42 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+         }
+     }
+ 
++    private boolean systemLinkPacketFlood(final Packet<?> packet) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (snapshot == null || !snapshot.security().packetFlood().enabled()) {
++            return false;
++        }
++        final dev.systemlink.spigot.configuration.MSpigotConfig.PacketFloodSettings flood = snapshot.security().packetFlood();
++        final int limit = flood.maxPacketsPerSecond() + flood.burst();
++        if (limit <= 0) {
++            return false;
++        }
++        final long now = System.nanoTime();
++        if (this.systemLinkPacketFloodWindowStart == 0L || now - this.systemLinkPacketFloodWindowStart >= 1_000_000_000L) {
++            this.systemLinkPacketFloodWindowStart = now;
++            this.systemLinkPacketFloodWindowCount = 0;
++            this.systemLinkPacketFloodLogged = false;
++        }
++        if (++this.systemLinkPacketFloodWindowCount <= limit) {
++            return false;
++        }
++        if (!this.systemLinkPacketFloodLogged) {
++            LOGGER.warn(
++                "mSpigot blocked packet flood from {}: {} packets this second (limit {}, last packet {})",
++                this.getLoggableAddress(net.minecraft.server.MinecraftServer.getServer().logIPs()),
++                this.systemLinkPacketFloodWindowCount,
++                limit,
++                packet.getClass().getSimpleName()
++            );
++            this.systemLinkPacketFloodLogged = true;
++        }
++        if (flood.kickOnViolation()) {
++            this.stopReadingPackets = true;
++            this.disconnect(Component.literal("Too many packets"));
++        }
++        return true;
++    }
++
+     private static <T extends PacketListener> void genericsFtw(final Packet<T> packet, final PacketListener listener) {
+         packet.handle((T)listener);
+     }
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 075e294333115738b25b64a390df323276cf39f9..aa2689ef773cf5a3e7b403f9a3e37e6a8fb411f7 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -535,9 +535,15 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     private void tickChunks(final ProfilerFiller profiler, final long timeDiff) {
+         profiler.push("naturalSpawnCount");
+         int chunkCount = this.distanceManager.getNaturalSpawnChunkCount();
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        final boolean systemLinkMobSpawning = systemLinkSnapshot == null || systemLinkSnapshot.entities().mobSpawning();
++        final boolean doMobSpawning = systemLinkMobSpawning && this.level.getGameRules().get(GameRules.SPAWN_MOBS) && !this.level.players().isEmpty(); // CraftBukkit
++        final boolean doNaturalMobSpawning = doMobSpawning && dev.systemlink.spigot.configuration.MSpigotConfig.shouldRunNaturalSpawning(this.level.getGameTime()); // mSpigot - staged natural spawning
+         // Paper start - Optional per player mob spawns
+         NaturalSpawner.SpawnState spawnCookie;
+-        if ((this.spawnFriendlies || this.spawnEnemies) && this.level.paperConfig().entities.spawning.perPlayerMobSpawns) { // don't count mobs when animals and monsters are disabled
++        if (!doNaturalMobSpawning) {
++            spawnCookie = this.lastSpawnState;
++        } else if ((this.spawnFriendlies || this.spawnEnemies) && this.level.paperConfig().entities.spawning.perPlayerMobSpawns) { // don't count mobs when animals and monsters are disabled
+             // re-set mob counts
+             for (ServerPlayer player : this.level.players()) {
+                 // Paper start - per player mob spawning backoff
+@@ -558,9 +564,8 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         }
+         // Paper end - Optional per player mob spawns
+         this.lastSpawnState = spawnCookie;
+-        boolean doMobSpawning = this.level.getGameRules().get(GameRules.SPAWN_MOBS) && !this.level.players().isEmpty(); // CraftBukkit
+         int tickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
+         List<MobCategory> spawningCategories;
+-        if (doMobSpawning && (this.spawnEnemies || this.spawnFriendlies)) { // Paper
++        if (doNaturalMobSpawning && (this.spawnEnemies || this.spawnFriendlies)) { // Paper
+             // Paper start - PlayerNaturallySpawnCreaturesEvent
+             for (ServerPlayer player : this.level.players()) {
+@@ -577,24 +582,28 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         } else {
+             spawningCategories = List.of();
+        }
+-
++
+-        List<LevelChunk> spawningChunks = this.spawningChunks;
++        final boolean doSpawningChunkScan = !dev.systemlink.spigot.configuration.MSpigotConfig.asyncSpawningEnabled()
++            || dev.systemlink.spigot.configuration.MSpigotConfig.shouldRunSpawningChunkScan(this.level.getGameTime()); // mSpigot - staged spawning-chunk scan
++        if (doSpawningChunkScan) {
++            List<LevelChunk> spawningChunks = this.spawningChunks;
+-
++
+-        try {
+-            profiler.popPush("filteringSpawningChunks");
+-            this.chunkMap.collectSpawningChunks(spawningChunks);
+-            profiler.popPush("shuffleSpawningChunks");
+-            // Paper start - chunk tick iteration optimisation
+-            this.shuffleRandom.setSeed(this.level.getRandom().nextLong());
+-            if (!this.level.paperConfig().entities.spawning.perPlayerMobSpawns) Util.shuffle(spawningChunks, this.level.getRandom()); // Paper - Optional per player mob spawns; do not need this when per-player is enabled
+-            // Paper end - chunk tick iteration optimisation
+-            profiler.popPush("tickSpawningChunks");
++            try {
++                profiler.popPush("filteringSpawningChunks");
++                this.chunkMap.collectSpawningChunks(spawningChunks);
++                profiler.popPush("shuffleSpawningChunks");
++                // Paper start - chunk tick iteration optimisation
++                this.shuffleRandom.setSeed(this.level.getRandom().nextLong());
++                if (!this.level.paperConfig().entities.spawning.perPlayerMobSpawns) Util.shuffle(spawningChunks, this.level.getRandom()); // Paper - Optional per player mob spawns; do not need this when per-player is enabled
++                // Paper end - chunk tick iteration optimisation
++                profiler.popPush("tickSpawningChunks");
+-
++
+-            for (LevelChunk chunk : spawningChunks) {
+-                this.tickSpawningChunk(chunk, timeDiff, spawningCategories, spawnCookie);
++                for (LevelChunk chunk : spawningChunks) {
++                    this.tickSpawningChunk(chunk, timeDiff, spawningCategories, spawnCookie);
++                }
++            } finally {
++                spawningChunks.clear();
+             }
+-        } finally {
+-            spawningChunks.clear();
+         }
+-
++
+         profiler.popPush("tickTickingChunks");
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 9415a75893a81f3d312117377b03aa440479599b..51aad6fa9d18c25d28d92138be83eb688183217a 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -805,7 +805,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             profiler.push("world border");
+             this.getWorldBorder().tick();
+             profiler.popPush("weather");
+-            this.advanceWeatherCycle();
++            if (dev.systemlink.spigot.configuration.MSpigotConfig.weatherTickingEnabled()
++                || dev.systemlink.spigot.configuration.MSpigotConfig.current() != null
++                    && dev.systemlink.spigot.configuration.MSpigotConfig.current().worldRuntime().alwaysPrettyWeather()) {
++                this.advanceWeatherCycle();
++            }
+             profiler.pop();
+         }
+ 
+@@ -856,7 +860,9 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         }
+ 
+         profiler.popPush("chunkSource");
+-        this.getChunkSource().tick(haveTime, true);
++        if (dev.systemlink.spigot.configuration.MSpigotConfig.chunkTickingEnabled()) {
++            this.getChunkSource().tick(haveTime, true);
++        }
+         profiler.popPush("blockEvents");
+         if (runs) {
+             this.runBlockEvents();
+@@ -1014,6 +1020,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+     public void tickChunk(final LevelChunk chunk, final int tickSpeed) {
+         final ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom simpleRandom = this.simpleRandom; // Paper - optimise random ticking
++        final int systemLinkTickSpeed = this.mSpigotAdjustedChunkTickSpeed(tickSpeed);
+         ChunkPos chunkPos = chunk.getPos();
+         int minX = chunkPos.getMinBlockX();
+         int minZ = chunkPos.getMinBlockZ();
+@@ -1021,7 +1028,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         profiler.push("iceandsnow");
+ 
+         if (!this.paperConfig().environment.disableIceAndSnow) { // Paper - Option to disable ice and snow
+-        for (int i = 0; i < tickSpeed; i++) {
++        for (int i = 0; i < systemLinkTickSpeed; i++) {
+             if (simpleRandom.nextInt(48) == 0) { // Paper - optimise random ticking
+                 this.tickPrecipitation(this.getBlockRandomPos(minX, 0, minZ, 15));
+             }
+@@ -1029,13 +1036,25 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         } // Paper - Option to disable ice and snow
+ 
+         profiler.popPush("tickBlocks");
+-        if (tickSpeed > 0) {
+-            this.optimiseRandomTick(chunk, tickSpeed); // Paper - optimise random ticking
++        if (systemLinkTickSpeed > 0) {
++            this.optimiseRandomTick(chunk, systemLinkTickSpeed); // Paper - optimise random ticking
+         }
+ 
+         profiler.pop();
+     }
+ 
++    private int mSpigotAdjustedChunkTickSpeed(final int tickSpeed) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (snapshot == null || tickSpeed <= 0) {
++            return tickSpeed;
++        }
++        return switch (snapshot.ticking().chunkMode()) {
++            case VANILLA -> tickSpeed;
++            case OPTIMIZED -> Math.max(1, tickSpeed / 2);
++            case EXTRA_OPTIMIZED -> Math.max(1, tickSpeed / 4);
++        };
++    }
++
+     public void tickThunder(final LevelChunk chunk) {
+         ChunkPos chunkPos = chunk.getPos();
+         boolean raining = this.isRaining();
+@@ -1217,7 +1236,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         boolean wasRaining = this.isRaining();
+         if (this.canHaveWeather()) {
+             WeatherData weatherData = this.getWeatherData();
+-            if (this.getGameRules().get(GameRules.ADVANCE_WEATHER)) {
++            final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++            if (systemLinkSnapshot != null && systemLinkSnapshot.worldRuntime().alwaysPrettyWeather()) {
++                weatherData.setClearWeatherTime(6000);
++                weatherData.setThunderTime(0);
++                weatherData.setRainTime(0);
++                weatherData.setThundering(false, org.bukkit.event.weather.ThunderChangeEvent.Cause.PLUGIN);
++                weatherData.setRaining(false, org.bukkit.event.weather.WeatherChangeEvent.Cause.PLUGIN);
++            } else if (this.getGameRules().get(GameRules.ADVANCE_WEATHER)) {
+                 int clearWeatherTime = weatherData.getClearWeatherTime();
+                 int thunderTime = weatherData.getThunderTime();
+                 int rainTime = weatherData.getRainTime();
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 3cd4e850f223100b61ac6831a87dd38f3a3bb58f..03d3dbe220d205b272686599624d19c5b823e515 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1107,6 +1107,10 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     // Paper end - PlayerDeathEvent#getItemsToKeep
+     // Paper start - Expand PlayerDeathEvent API
+     private void sendClientboundPlayerCombatKillPacket(boolean displayMessage, Component deathMessage) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot != null && !systemLinkSnapshot.general().deathScreen()) {
++            return;
++        }
+         if (displayMessage && deathMessage != CommonComponents.EMPTY) {
+             // Paper - moved from below die(DamageSource) method
+             this.connection
+diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
+index 8a2f1ebcf06bb0c1e8b352652de69b6c1d74daf3..64af84058a7c50a43925eb2d03ff439f910e4c8f 100644
+--- a/net/minecraft/server/network/ServerConnectionListener.java
++++ b/net/minecraft/server/network/ServerConnectionListener.java
+@@ -5,7 +5,6 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
+ import com.mojang.logging.LogUtils;
+ import io.netty.bootstrap.ServerBootstrap;
+ import io.netty.channel.Channel;
+-import io.netty.channel.ChannelException;
+ import io.netty.channel.ChannelFuture;
+ import io.netty.channel.ChannelHandlerContext;
+ import io.netty.channel.ChannelInboundHandlerAdapter;
+@@ -86,18 +85,15 @@ public class ServerConnectionListener {
+             // Paper end - Use Velocity cipher
+             this.channels
+                 .add(
+-                    new ServerBootstrap()
++                    dev.systemlink.spigot.network.MSpigotNettyTuning.applyServerOptions(new ServerBootstrap()
+                         .channel(eventLoopGroupHolder.serverChannelCls())
+                         .childHandler(
+                             new ChannelInitializer<Channel>() {
+                                 @Override
+                                 protected void initChannel(final Channel channel) {
+-                                    try {
+-                                        channel.config().setOption(ChannelOption.TCP_NODELAY, true);
+-                                    } catch (ChannelException var5) {
+-                                    }
++                                    dev.systemlink.spigot.network.MSpigotNettyTuning.applyChildOptions(channel);
+ 
+-                                    if (!disableFlushConsolidation) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler()); // Paper - Optimize network
++                                    if (!disableFlushConsolidation && dev.systemlink.spigot.network.MSpigotNettyTuning.flushConsolidationEnabled()) channel.pipeline().addFirst(new io.netty.handler.flush.FlushConsolidationHandler()); // Paper - Optimize network
+                                     ChannelPipeline pipeline = channel.pipeline().addLast(HandlerNames.TIMEOUT, new ReadTimeoutHandler(30));
+                                     if (ServerConnectionListener.this.server.repliesToStatus()) {
+                                         pipeline.addLast(HandlerNames.LEGACY_QUERY, new LegacyQueryHandler(ServerConnectionListener.this.getServer()));
+@@ -149,7 +145,7 @@ public class ServerConnectionListener {
+                         )
+                         .group(eventLoopGroupHolder.eventLoopGroup())
+                         .localAddress(address) // Paper - Unix domain socket support
+-                        .option(ChannelOption.AUTO_READ, false) // CraftBukkit
++                        .option(ChannelOption.AUTO_READ, false)) // CraftBukkit
+                         .bind()
+                         .syncUninterruptibly()
+                 );
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 4b466061fb3862e325633d01f33a0b7fd811c2ea..b20fb4631cdb79e17d9c7ce92d3f31cc4a55c76c 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -300,6 +300,8 @@ public class ServerGamePacketListenerImpl
+     private int receivedMovePacketCount;
+     private int knownMovePacketCount;
+     private boolean receivedMovementThisTick;
++    private int systemLinkLastMoveTick = -1;
++    private int systemLinkMovePacketsThisTick;
+     // CraftBukkit start - add fields
+     private int lastTick = MinecraftServer.currentTick;
+     private int allowedPlayerTicks = 1;
+@@ -539,11 +541,26 @@ public class ServerGamePacketListenerImpl
+         return Mth.clamp(value, -2.0E7, 2.0E7);
+     }
+ 
++    private boolean systemLinkMovementBurstAllowed() {
++        final int currentTick = MinecraftServer.currentTick;
++        if (this.systemLinkLastMoveTick != currentTick) {
++            this.systemLinkLastMoveTick = currentTick;
++            this.systemLinkMovePacketsThisTick = 0;
++        }
++        return dev.systemlink.spigot.security.MSpigotSecurity.movementBurstAllowed(
++            this.connection,
++            this.player,
++            ++this.systemLinkMovePacketsThisTick
++        );
++    }
++
+     @Override
+     public void handleMoveVehicle(final ServerboundMoveVehiclePacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+         if (containsInvalidValues(packet.position().x(), packet.position().y(), packet.position().z(), packet.yRot(), packet.xRot())) {
+             this.disconnect(Component.translatable("multiplayer.disconnect.invalid_vehicle_movement"), org.bukkit.event.player.PlayerKickEvent.Cause.INVALID_VEHICLE_MOVEMENT); // Paper - kick event cause
++        } else if (!this.systemLinkMovementBurstAllowed()) {
++            return;
+         } else if (!this.updateAwaitingTeleport() && this.hasClientLoaded()) {
+             Entity vehicle = this.player.getRootVehicle();
+             // Paper start - Don't allow vehicle movement from players while teleporting
+@@ -672,52 +689,54 @@ public class ServerGamePacketListenerImpl
+                 vehicle.absSnapTo(targetX, targetY, targetZ, targetYRot, targetXRot);
+                 // CraftBukkit start - fire PlayerMoveEvent TODO: this should be removed.
+                 this.player.absSnapTo(targetX, targetY, targetZ, this.player.getYRot(), this.player.getXRot()); // Paper - TODO: This breaks alot of stuff
+-                org.bukkit.entity.Player player = this.getCraftPlayer();
+-                if (!this.hasMoved) {
+-                    this.lastPosX = startX;
+-                    this.lastPosY = startY;
+-                    this.lastPosZ = startZ;
+-                    this.lastYRot = startYRot;
+-                    this.lastXRot = startXRot;
+-                    this.hasMoved = true;
+-                }
+-                Location from = new Location(player.getWorld(), this.lastPosX, this.lastPosY, this.lastPosZ, this.lastYRot, this.lastXRot); // Get the Players previous Event location.
+-                Location to = new Location(player.getWorld(), targetX, targetY, targetZ, targetYRot, targetXRot);
+-
+-                // Prevent 40 event-calls for less than a single pixel of movement >.>
+-                double delta = Mth.square(this.lastPosX - to.getX()) + Mth.square(this.lastPosY - to.getY()) + Mth.square(this.lastPosZ - to.getZ());
+-                float deltaAngle = Math.abs(this.lastYRot - to.getYaw()) + Math.abs(this.lastXRot - to.getPitch());
+-
+-                if ((delta > 1f / 256 || deltaAngle > 10f) && !this.player.isImmobile()) {
+-                    this.lastPosX = to.getX();
+-                    this.lastPosY = to.getY();
+-                    this.lastPosZ = to.getZ();
+-                    this.lastYRot = to.getYaw();
+-                    this.lastXRot = to.getPitch();
+-
+-                    Location oldTo = to.clone();
+-                    PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
+-                    this.cserver.getPluginManager().callEvent(event);
+-
+-                    // If the event is cancelled we move the player back to their old location.
+-                    if (event.isCancelled()) {
+-                        this.internalTeleport(from);
+-                        return;
++                if (dev.systemlink.spigot.configuration.MSpigotConfig.playerMoveEventEnabled()) {
++                    org.bukkit.entity.Player player = this.getCraftPlayer();
++                    if (!this.hasMoved) {
++                        this.lastPosX = startX;
++                        this.lastPosY = startY;
++                        this.lastPosZ = startZ;
++                        this.lastYRot = startYRot;
++                        this.lastXRot = startXRot;
++                        this.hasMoved = true;
+                     }
++                    Location from = new Location(player.getWorld(), this.lastPosX, this.lastPosY, this.lastPosZ, this.lastYRot, this.lastXRot); // Get the Players previous Event location.
++                    Location to = new Location(player.getWorld(), targetX, targetY, targetZ, targetYRot, targetXRot);
++
++                    // Prevent 40 event-calls for less than a single pixel of movement >.>
++                    double delta = Mth.square(this.lastPosX - to.getX()) + Mth.square(this.lastPosY - to.getY()) + Mth.square(this.lastPosZ - to.getZ());
++                    float deltaAngle = Math.abs(this.lastYRot - to.getYaw()) + Math.abs(this.lastXRot - to.getPitch());
++
++                    if ((delta > 1f / 256 || deltaAngle > 10f) && !this.player.isImmobile()) {
++                        this.lastPosX = to.getX();
++                        this.lastPosY = to.getY();
++                        this.lastPosZ = to.getZ();
++                        this.lastYRot = to.getYaw();
++                        this.lastXRot = to.getPitch();
++
++                        Location oldTo = to.clone();
++                        PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
++                        this.cserver.getPluginManager().callEvent(event);
+ 
+-                    // If a Plugin has changed the To destination then we teleport the Player
+-                    // there to avoid any 'Moved wrongly' or 'Moved too quickly' errors.
+-                    // We only do this if the Event was not cancelled.
+-                    if (!oldTo.equals(event.getTo()) && !event.isCancelled()) {
+-                        this.player.getBukkitEntity().teleport(event.getTo(), PlayerTeleportEvent.TeleportCause.PLUGIN);
+-                        return;
+-                    }
++                        // If the event is cancelled we move the player back to their old location.
++                        if (event.isCancelled()) {
++                            this.internalTeleport(from);
++                            return;
++                        }
+ 
+-                    // Check to see if the Players Location has some how changed during the call of the event.
+-                    // This can happen due to a plugin teleporting the player instead of using .setTo()
+-                    if (!from.equals(this.getCraftPlayer().getLocation()) && this.justTeleported) {
+-                        this.justTeleported = false;
+-                        return;
++                        // If a Plugin has changed the To destination then we teleport the Player
++                        // there to avoid any 'Moved wrongly' or 'Moved too quickly' errors.
++                        // We only do this if the Event was not cancelled.
++                        if (!oldTo.equals(event.getTo()) && !event.isCancelled()) {
++                            this.player.getBukkitEntity().teleport(event.getTo(), PlayerTeleportEvent.TeleportCause.PLUGIN);
++                            return;
++                        }
++
++                        // Check to see if the Players Location has some how changed during the call of the event.
++                        // This can happen due to a plugin teleporting the player instead of using .setTo()
++                        if (!from.equals(this.getCraftPlayer().getLocation()) && this.justTeleported) {
++                            this.justTeleported = false;
++                            return;
++                        }
+                     }
+                 }
+                 // CraftBukkit end
+@@ -1467,6 +1486,8 @@ public class ServerGamePacketListenerImpl
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+         if (containsInvalidValues(packet.getX(0.0), packet.getY(0.0), packet.getZ(0.0), packet.getYRot(0.0F), packet.getXRot(0.0F))) {
+             this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"), org.bukkit.event.player.PlayerKickEvent.Cause.INVALID_PLAYER_MOVEMENT); // Paper - kick event cause
++        } else if (!this.systemLinkMovementBurstAllowed()) {
++            return;
+         } else {
+             ServerLevel level = this.player.level();
+             if (!this.player.wonGame && !this.player.isImmobile()) { // CraftBukkit
+@@ -1682,55 +1703,57 @@ public class ServerGamePacketListenerImpl
+                                 if (allowMovement) {
+                                     // Paper end - Add fail move event
+                                     // CraftBukkit start - fire PlayerMoveEvent
+-                                    // Reset to old location first
+-                                    this.player.absSnapTo(startX, startY, startZ, startYRot, startXRot);
+-
+-                                    org.bukkit.entity.Player player = this.getCraftPlayer();
+-                                    if (!this.hasMoved) {
+-                                        this.lastPosX = startX;
+-                                        this.lastPosY = startY;
+-                                        this.lastPosZ = startZ;
+-                                        this.lastYRot = startYRot;
+-                                        this.lastXRot = startXRot;
+-                                        this.hasMoved = true;
+-                                    }
+-                                    Location from = new Location(player.getWorld(), this.lastPosX, this.lastPosY, this.lastPosZ, this.lastYRot, this.lastXRot); // Get the Players previous Event location.
+-                                    Location to = new Location(player.getWorld(), targetX, targetY, targetZ, targetYRot, targetXRot);
+-
+-                                    // Prevent 40 event-calls for less than a single pixel of movement >.>
+-                                    double delta = Mth.square(this.lastPosX - to.getX()) + Mth.square(this.lastPosY - to.getY()) + Mth.square(this.lastPosZ - to.getZ());
+-                                    float deltaAngle = Math.abs(this.lastYRot - to.getYaw()) + Math.abs(this.lastXRot - to.getPitch());
+-
+-                                    if ((delta > 1f / 256 || deltaAngle > 10.0F) && !this.player.isImmobile()) {
+-                                        this.lastPosX = to.getX();
+-                                        this.lastPosY = to.getY();
+-                                        this.lastPosZ = to.getZ();
+-                                        this.lastYRot = to.getYaw();
+-                                        this.lastXRot = to.getPitch();
+-
+-                                        Location oldTo = to.clone();
+-                                        PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
+-                                        this.cserver.getPluginManager().callEvent(event);
+-
+-                                        // If the event is cancelled we move the player back to their old location.
+-                                        if (event.isCancelled()) {
+-                                            this.internalTeleport(from);
+-                                            return;
++                                    if (dev.systemlink.spigot.configuration.MSpigotConfig.playerMoveEventEnabled()) {
++                                        // Reset to old location first
++                                        this.player.absSnapTo(startX, startY, startZ, startYRot, startXRot);
++
++                                        org.bukkit.entity.Player player = this.getCraftPlayer();
++                                        if (!this.hasMoved) {
++                                            this.lastPosX = startX;
++                                            this.lastPosY = startY;
++                                            this.lastPosZ = startZ;
++                                            this.lastYRot = startYRot;
++                                            this.lastXRot = startXRot;
++                                            this.hasMoved = true;
+                                         }
++                                        Location from = new Location(player.getWorld(), this.lastPosX, this.lastPosY, this.lastPosZ, this.lastYRot, this.lastXRot); // Get the Players previous Event location.
++                                        Location to = new Location(player.getWorld(), targetX, targetY, targetZ, targetYRot, targetXRot);
++
++                                        // Prevent 40 event-calls for less than a single pixel of movement >.>
++                                        double delta = Mth.square(this.lastPosX - to.getX()) + Mth.square(this.lastPosY - to.getY()) + Mth.square(this.lastPosZ - to.getZ());
++                                        float deltaAngle = Math.abs(this.lastYRot - to.getYaw()) + Math.abs(this.lastXRot - to.getPitch());
++
++                                        if ((delta > 1f / 256 || deltaAngle > 10.0F) && !this.player.isImmobile()) {
++                                            this.lastPosX = to.getX();
++                                            this.lastPosY = to.getY();
++                                            this.lastPosZ = to.getZ();
++                                            this.lastYRot = to.getYaw();
++                                            this.lastXRot = to.getPitch();
++
++                                            Location oldTo = to.clone();
++                                            PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
++                                            this.cserver.getPluginManager().callEvent(event);
++
++                                            // If the event is cancelled we move the player back to their old location.
++                                            if (event.isCancelled()) {
++                                                this.internalTeleport(from);
++                                                return;
++                                            }
+ 
+-                                        // If a Plugin has changed the To destination then we teleport the Player
+-                                        // there to avoid any 'Moved wrongly' or 'Moved too quickly' errors.
+-                                        // We only do this if the Event was not cancelled.
+-                                        if (!oldTo.equals(event.getTo()) && !event.isCancelled()) {
+-                                            this.player.getBukkitEntity().teleport(event.getTo(), PlayerTeleportEvent.TeleportCause.PLUGIN);
+-                                            return;
+-                                        }
++                                            // If a Plugin has changed the To destination then we teleport the Player
++                                            // there to avoid any 'Moved wrongly' or 'Moved too quickly' errors.
++                                            // We only do this if the Event was not cancelled.
++                                            if (!oldTo.equals(event.getTo()) && !event.isCancelled()) {
++                                                this.player.getBukkitEntity().teleport(event.getTo(), PlayerTeleportEvent.TeleportCause.PLUGIN);
++                                                return;
++                                            }
+ 
+-                                        // Check to see if the Players Location has some how changed during the call of the event.
+-                                        // This can happen due to a plugin teleporting the player instead of using .setTo()
+-                                        if (!from.equals(this.getCraftPlayer().getLocation()) && this.justTeleported) {
+-                                            this.justTeleported = false;
+-                                            return;
++                                            // Check to see if the Players Location has some how changed during the call of the event.
++                                            // This can happen due to a plugin teleporting the player instead of using .setTo()
++                                            if (!from.equals(this.getCraftPlayer().getLocation()) && this.justTeleported) {
++                                                this.justTeleported = false;
++                                                return;
++                                            }
+                                         }
+                                     }
+                                     // Paper end
+@@ -2124,6 +2147,9 @@ public class ServerGamePacketListenerImpl
+             ServerLevel level = this.player.level();
+             InteractionHand hand = packet.getHand();
+             ItemStack itemStack = this.player.getItemInHand(hand);
++            if (!dev.systemlink.spigot.security.MSpigotSecurity.handleHeldItemUse(this.connection, this.player, itemStack, "block place")) {
++                return;
++            }
+             if (itemStack.isItemEnabled(level.enabledFeatures())) {
+                 BlockHitResult blockHit = packet.getHitResult();
+                 Vec3 location = blockHit.getLocation();
+@@ -2212,6 +2238,9 @@ public class ServerGamePacketListenerImpl
+             ServerLevel level = this.player.level();
+             InteractionHand hand = packet.getHand();
+             ItemStack itemStack = this.player.getItemInHand(hand);
++            if (!dev.systemlink.spigot.security.MSpigotSecurity.handleHeldItemUse(this.connection, this.player, itemStack, "item use")) {
++                return;
++            }
+             this.player.resetLastActionTime();
+             if (!itemStack.isEmpty() && itemStack.isItemEnabled(level.enabledFeatures())) {
+                 float targetYRot = Mth.wrapDegrees(packet.getYRot());
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index f45b2af7a03527a041d33398b6abca4ebff0d8d7..c25217050618c225f2e3d697942d54cfba7da464 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -425,6 +425,8 @@ public abstract class PlayerList {
+ 
+     protected void save(final ServerPlayer player) {
+         if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot != null && !systemLinkSnapshot.worldRuntime().savePlayerData()) return; // mSpigot
+         player.lastSave = MinecraftServer.currentTick; // Paper - Incremental chunk and player saving
+         this.playerIo.save(player);
+         ServerStatsCounter stats = player.getStats(); // CraftBukkit
+diff --git a/net/minecraft/world/clock/ServerClockManager.java b/net/minecraft/world/clock/ServerClockManager.java
+index 436ed3d95c21b8590664a125785545e0d07375fd..9801fed1097709b53d6eb83ceff8d3f9a97bccc3 100644
+--- a/net/minecraft/world/clock/ServerClockManager.java
++++ b/net/minecraft/world/clock/ServerClockManager.java
+@@ -69,12 +69,52 @@ public class ServerClockManager extends SavedData implements ClockManager {
+ 
+     public void tick() {
+         boolean advanceTime = this.advanceTime(); // Paper - per-world time
++        boolean dirty = false;
+         if (advanceTime) {
+             this.clocks.values().forEach(ServerClockManager.ClockInstance::tick);
++            dirty = true;
++        }
++        dirty |= this.mSpigotKeepAlwaysDay();
++        if (dirty) {
+             this.setDirty();
+         }
+     }
+ 
++    private boolean mSpigotKeepAlwaysDay() {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (snapshot == null || !snapshot.worldRuntime().alwaysDay()) {
++            return false;
++        }
++        boolean changed = false;
++        if (this.level != null) {
++            changed = this.mSpigotPinLevelDay(this.level);
++        } else if (this.server != null) {
++            for (final ServerLevel serverLevel : this.server.getAllLevels()) {
++                changed |= this.mSpigotPinLevelDay(serverLevel);
++            }
++        }
++        return changed;
++    }
++
++    private boolean mSpigotPinLevelDay(final ServerLevel serverLevel) {
++        final java.util.Optional<Holder<WorldClock>> defaultClock = serverLevel.dimensionType().defaultClock();
++        if (defaultClock.isEmpty()) {
++            return false;
++        }
++        final ServerClockManager.ClockInstance instance = this.clocks.get(defaultClock.get());
++        if (instance == null) {
++            return false;
++        }
++        final long dayTime = Math.floorMod(instance.totalTicks, 24000L);
++        if (dayTime == 6000L) {
++            return false;
++        }
++        instance.totalTicks = instance.totalTicks - dayTime + 6000L;
++        instance.partialTick = 0.0F;
++        serverLevel.environmentAttributes().invalidateTickCache();
++        return true;
++    }
++
+     private ServerClockManager.ClockInstance getInstance(final Holder<WorldClock> definition) {
+         ServerClockManager.ClockInstance instance = this.clocks.get(definition);
+         if (instance == null) {
+diff --git a/net/minecraft/world/entity/Mob.java b/net/minecraft/world/entity/Mob.java
+index 95fdf7ffc483ae461275a8be82f1344ced772f08..456056cdec72e55088744a878a4f568063fcc0fb 100644
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -532,6 +532,7 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("looting");
+         if (this.level() instanceof ServerLevel serverLevel
++            && this.systemLinkCanSearchForItems()
+             && this.canPickUpLoot()
+             && this.isAlive()
+             && !this.dead
+@@ -554,6 +555,18 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+         profiler.pop();
+     }
+ 
++    private boolean systemLinkCanSearchForItems() {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (snapshot == null) {
++            return true;
++        }
++        if (!snapshot.entities().mobItemPickup()) {
++            return false;
++        }
++        final int delay = snapshot.entities().searchDelayTicks();
++        return delay <= 0 || (this.tickCount + this.getId()) % (delay + 1) == 0;
++    }
++
+     protected EquipmentSlot sunProtectionSlot() {
+         return EquipmentSlot.HEAD;
+     }
+@@ -824,7 +837,12 @@ public abstract class Mob extends LivingEntity implements Targeting, EquipmentUs
+         this.sensing.tick();
+         profiler.pop();
+         int idBasedTickCount = this.tickCount + this.getId();
+-        if (idBasedTickCount % 2 != 0 && this.tickCount > 1) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        final int systemLinkGoalThrottle = systemLinkSnapshot == null ? 0 : systemLinkSnapshot.entities().aiGoalSelectorThrottleTicks();
++        final boolean systemLinkRunningGoalsOnly = this.tickCount > 1 && (systemLinkGoalThrottle > 0
++            ? idBasedTickCount % (systemLinkGoalThrottle + 1) != 0
++            : idBasedTickCount % 2 != 0);
++        if (systemLinkRunningGoalsOnly) {
+             profiler.push("targetSelector");
+             this.targetSelector.tickRunningGoals(false);
+             profiler.pop();
+diff --git a/net/minecraft/world/entity/npc/villager/Villager.java b/net/minecraft/world/entity/npc/villager/Villager.java
+index 0a02aef2ff159a1d94870bf3cede0ed29ae192af..0d072a7d9b0a6cad3a8b29941b94f059d6ef079b 100644
+--- a/net/minecraft/world/entity/npc/villager/Villager.java
++++ b/net/minecraft/world/entity/npc/villager/Villager.java
+@@ -261,6 +261,9 @@ public class Villager extends AbstractVillager implements VillagerDataHolder, Re
+     }
+     protected void customServerAiStep(ServerLevel level, final boolean inactive) {
+         // Paper end - EAR 2
++        if (!dev.systemlink.spigot.configuration.MSpigotConfig.villagerTickingEnabled()) {
++            return;
++        }
+         ProfilerFiller profiler = Profiler.get();
+         profiler.push("villagerBrain");
+         if (!inactive) this.getBrain().tick(level, this); // Paper - EAR 2
+diff --git a/net/minecraft/world/entity/player/Player.java b/net/minecraft/world/entity/player/Player.java
+index 9e442d3ce5d6b6c64260c83ebfb1551e1c981b6f..b33bef88ee6f20c06842cffb994207df4c77d337 100644
+--- a/net/minecraft/world/entity/player/Player.java
++++ b/net/minecraft/world/entity/player/Player.java
+@@ -1604,6 +1604,10 @@ public abstract class Player extends Avatar implements ContainerUser {
+ 
+     @Override
+     protected void playStepSound(final BlockPos onPos, final BlockState onState) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot != null && !systemLinkSnapshot.general().footstepSounds()) {
++            return;
++        }
+         if (this.isInWater()) {
+             this.waterSwimSound();
+             this.playMuffledStepSound(onState);
+diff --git a/net/minecraft/world/item/BlockItem.java b/net/minecraft/world/item/BlockItem.java
+index b94c4f0a6908a37d8a07dba6ff3ece7193aca1b5..e4d01682d5017ea2571a53779beb883b4242f393 100644
+--- a/net/minecraft/world/item/BlockItem.java
++++ b/net/minecraft/world/item/BlockItem.java
+@@ -189,6 +189,13 @@ public class BlockItem extends Item {
+             return false;
+         }
+ 
++        if (!dev.systemlink.spigot.security.MSpigotSecurity.mayApplyPlacedBlockEntityData(
++            itemStack,
++            player instanceof ServerPlayer serverPlayer ? serverPlayer : null
++        )) {
++            return false;
++        }
++
+         TypedEntityData<BlockEntityType<?>> customData = itemStack.get(DataComponents.BLOCK_ENTITY_DATA);
+         if (customData != null) {
+             BlockEntity blockEntity = level.getBlockEntity(pos);
+diff --git a/net/minecraft/world/item/crafting/RecipeManager.java b/net/minecraft/world/item/crafting/RecipeManager.java
+index 6812ade4d9de26d507234b8357b109ec7e5cbb50..cf838ba8d127de4e5dc202881b49ea8c2203ca67 100644
+--- a/net/minecraft/world/item/crafting/RecipeManager.java
++++ b/net/minecraft/world/item/crafting/RecipeManager.java
+@@ -1,17 +1,24 @@
+ package net.minecraft.world.item.crafting;
+ 
+ import com.google.common.annotations.VisibleForTesting;
++import com.google.gson.JsonElement;
+ import com.google.gson.JsonObject;
+ import com.google.gson.JsonParseException;
+ import com.mojang.logging.LogUtils;
++import com.mojang.serialization.DynamicOps;
+ import com.mojang.serialization.JsonOps;
+ import it.unimi.dsi.fastutil.objects.Object2IntMap;
+ import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
++import java.io.IOException;
++import java.io.Reader;
+ import java.util.ArrayList;
+ import java.util.Collection;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ForkJoinPool;
+ import java.util.IdentityHashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Map.Entry;
+ import java.util.Optional;
+ import java.util.OptionalInt;
+ import java.util.SortedMap;
+@@ -24,9 +31,10 @@ import net.minecraft.resources.FileToIdConverter;
+ import net.minecraft.resources.Identifier;
+ import net.minecraft.resources.ResourceKey;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.server.packs.resources.Resource;
+ import net.minecraft.server.packs.resources.ResourceManager;
+-import net.minecraft.server.packs.resources.SimpleJsonResourceReloadListener;
+ import net.minecraft.server.packs.resources.SimplePreparableReloadListener;
++import net.minecraft.util.StrictJsonParser;
+ import net.minecraft.util.profiling.ProfilerFiller;
+ import net.minecraft.world.flag.FeatureFlagSet;
+ import net.minecraft.world.item.crafting.display.RecipeDisplay;
+@@ -68,10 +76,11 @@ public class RecipeManager extends SimplePreparableReloadListener<RecipeMap> imp
+ 
+     @Override
+     protected RecipeMap prepare(final ResourceManager manager, final ProfilerFiller profiler) {
+-        SortedMap<Identifier, Recipe<?>> recipes = new TreeMap<>();
+-        SimpleJsonResourceReloadListener.scanDirectory(
+-            manager, RECIPE_LISTER, this.registries.createSerializationContext(JsonOps.INSTANCE), Recipe.CODEC, recipes
+-        );
++        final Map<Identifier, Resource> resources = RECIPE_LISTER.listMatchingResources(manager);
++        final Map<Identifier, Recipe<?>> parsedRecipes = dev.systemlink.spigot.configuration.MSpigotConfig.parallelRecipeLoadingEnabled(resources.size())
++            ? this.parseRecipesInParallel(resources)
++            : this.parseRecipesSerially(resources);
++        SortedMap<Identifier, Recipe<?>> recipes = new TreeMap<>(parsedRecipes);
+         List<RecipeHolder<?>> recipeHolders = new ArrayList<>(recipes.size());
+         recipes.forEach((id, recipe) -> {
+             ResourceKey<Recipe<?>> key = ResourceKey.create(Registries.RECIPE, id);
+@@ -81,6 +90,46 @@ public class RecipeManager extends SimplePreparableReloadListener<RecipeMap> imp
+         return RecipeMap.create(recipeHolders);
+     }
+ 
++    private Map<Identifier, Recipe<?>> parseRecipesSerially(final Map<Identifier, Resource> resources) {
++        final Map<Identifier, Recipe<?>> recipes = new TreeMap<>();
++        final DynamicOps<JsonElement> ops = this.registries.createSerializationContext(JsonOps.INSTANCE);
++        for (final Entry<Identifier, Resource> entry : resources.entrySet()) {
++            this.parseRecipe(entry, ops, recipes);
++        }
++        return recipes;
++    }
++
++    private Map<Identifier, Recipe<?>> parseRecipesInParallel(final Map<Identifier, Resource> resources) {
++        final Map<Identifier, Recipe<?>> recipes = new ConcurrentHashMap<>();
++        final DynamicOps<JsonElement> ops = this.registries.createSerializationContext(JsonOps.INSTANCE);
++        final ForkJoinPool pool = new ForkJoinPool(dev.systemlink.spigot.configuration.MSpigotConfig.parallelRecipeLoadingThreads());
++        try {
++            pool.submit(() -> resources.entrySet().parallelStream().forEach(entry -> this.parseRecipe(entry, ops, recipes))).join();
++        } finally {
++            pool.shutdown();
++        }
++        return recipes;
++    }
++
++    private void parseRecipe(
++        final Entry<Identifier, Resource> entry,
++        final DynamicOps<JsonElement> ops,
++        final Map<Identifier, Recipe<?>> recipes
++    ) {
++        Identifier location = entry.getKey();
++        Identifier id = RECIPE_LISTER.fileToId(location);
++
++        try (Reader reader = entry.getValue().openAsReader()) {
++            Recipe.CODEC.parse(ops, StrictJsonParser.parse(reader)).ifSuccess(parsed -> {
++                if (recipes.putIfAbsent(id, parsed) != null) {
++                    throw new IllegalStateException("Duplicate data file ignored with ID " + id);
++                }
++            }).ifError(error -> LOGGER.error("Couldn't parse data file '{}' from '{}': {}", id, location, error));
++        } catch (JsonParseException | IllegalArgumentException | IOException e) {
++            LOGGER.error("Couldn't parse data file '{}' from '{}'", id, location, e);
++        }
++    }
++
+     @Override
+     protected void apply(final RecipeMap recipes, final ResourceManager manager, final ProfilerFiller profiler) {
+         this.recipes = recipes;
+diff --git a/net/minecraft/world/level/BaseSpawner.java b/net/minecraft/world/level/BaseSpawner.java
+index 2f89a9145902e514089924462003709f256ac3f4..7960ade7a4c6ddcc285617dabf0ce932be4526ef 100644
+--- a/net/minecraft/world/level/BaseSpawner.java
++++ b/net/minecraft/world/level/BaseSpawner.java
+@@ -7,10 +7,12 @@ import net.minecraft.core.particles.ParticleTypes;
+ import net.minecraft.core.registries.BuiltInRegistries;
+ import net.minecraft.nbt.CompoundTag;
+ import net.minecraft.server.level.ServerLevel;
++import net.minecraft.tags.FluidTags;
+ import net.minecraft.util.ProblemReporter;
+ import net.minecraft.util.RandomSource;
+ import net.minecraft.util.random.WeightedList;
+ import net.minecraft.world.Difficulty;
++import net.minecraft.world.entity.AgeableMob;
+ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.entity.EntityProcessor;
+ import net.minecraft.world.entity.EntitySelector;
+@@ -89,13 +91,18 @@ public abstract class BaseSpawner {
+     }
+ 
+     public void serverTick(final ServerLevel level, final BlockPos pos) {
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot != null && !systemLinkSnapshot.entities().mobSpawning()) {
++            return;
++        }
++        this.mSpigotApplySpawnerSettings(systemLinkSnapshot);
+         if (spawnCount <= 0 || maxNearbyEntities <= 0) return; // Paper - Ignore impossible spawn tick
+         // Paper start - Configurable mob spawner tick rate
+         if (spawnDelay > 0 && --tickDelay > 0) return;
+         tickDelay = level.paperConfig().tickRates.mobSpawner;
+         if (tickDelay == -1) { return; } // If disabled
+         // Paper end - Configurable mob spawner tick rate
+-        if (this.isNearPlayer(level, pos) && level.isSpawnerBlockEnabled()) {
++        if (this.mSpigotCanTickSpawner(level, pos, systemLinkSnapshot) && level.isSpawnerBlockEnabled()) {
+             if (this.spawnDelay < -tickDelay) { // Paper - Configurable mob spawner tick rate
+                 this.delay(level, pos);
+             }
+@@ -124,19 +131,24 @@ public abstract class BaseSpawner {
+                                     pos.getZ() + (random.nextDouble() - random.nextDouble()) * this.spawnRange + 0.5
+                                 )
+                             );
+-                        if (level.noCollision(entityType.get().getSpawnAABB(spawnPos.x, spawnPos.y, spawnPos.z))) {
++                        if (this.mSpigotCanSpawnInBlock(level, entityType.get(), spawnPos, systemLinkSnapshot)) {
+                             BlockPos spawnBlockPos = BlockPos.containing(spawnPos);
+-                            if (nextSpawnData.getCustomSpawnRules().isPresent()) {
+-                                if (!entityType.get().getCategory().isFriendly() && level.getDifficulty() == Difficulty.PEACEFUL) {
+-                                    continue;
+-                                }
+-
+-                                SpawnData.CustomSpawnRules customSpawnRules = nextSpawnData.getCustomSpawnRules().get();
+-                                if (!customSpawnRules.isValidPosition(spawnBlockPos, level)) {
++                            if (this.mSpigotPreventsWaterSpawn(level, spawnBlockPos, systemLinkSnapshot)) {
++                                continue;
++                            }
++                            if (!this.mSpigotSpawnerIgnoresRules(systemLinkSnapshot)) {
++                                if (nextSpawnData.getCustomSpawnRules().isPresent()) {
++                                    if (!entityType.get().getCategory().isFriendly() && level.getDifficulty() == Difficulty.PEACEFUL) {
++                                        continue;
++                                    }
++
++                                    SpawnData.CustomSpawnRules customSpawnRules = nextSpawnData.getCustomSpawnRules().get();
++                                    if (!customSpawnRules.isValidPosition(spawnBlockPos, level)) {
++                                        continue;
++                                    }
++                                } else if (!SpawnPlacements.checkSpawnRules(entityType.get(), level, EntitySpawnReason.SPAWNER, spawnBlockPos, level.getRandom())) {
+                                     continue;
+                                 }
+-                            } else if (!SpawnPlacements.checkSpawnRules(entityType.get(), level, EntitySpawnReason.SPAWNER, spawnBlockPos, level.getRandom())) {
+-                                continue;
+                             }
+ 
+                             // Paper start - PreCreatureSpawnEvent
+@@ -163,6 +175,7 @@ public abstract class BaseSpawner {
+                                 return;
+                             }
+ 
++                            if (this.mSpigotChecksMaxNearby(systemLinkSnapshot)) {
+                             int nearBy = level.getEntities(
+                                     EntityTypeTest.forExactClass(entity.getClass()),
+                                     new AABB(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1).inflate(this.spawnRange),
+@@ -173,12 +186,15 @@ public abstract class BaseSpawner {
+                                 this.delay(level, pos);
+                                 return;
+                             }
++                            }
+ 
+                             entity.snapTo(entity.getX(), entity.getY(), entity.getZ(), random.nextFloat() * 360.0F, 0.0F);
+                             if (entity instanceof Mob mob) {
+-                                if (nextSpawnData.getCustomSpawnRules().isEmpty() && !mob.checkSpawnRules(level, EntitySpawnReason.SPAWNER)
+-                                    || !mob.checkSpawnObstruction(level)) {
+-                                    continue;
++                                if (!this.mSpigotSpawnerIgnoresRules(systemLinkSnapshot)) {
++                                    if (nextSpawnData.getCustomSpawnRules().isEmpty() && !mob.checkSpawnRules(level, EntitySpawnReason.SPAWNER)
++                                        || !mob.checkSpawnObstruction(level)) {
++                                        continue;
++                                    }
+                                 }
+ 
+                                 boolean hasNoConfiguration = nextSpawnData.getEntityToSpawn().size() == 1
+@@ -194,6 +210,12 @@ public abstract class BaseSpawner {
+                                 }
+                                 // Spigot end
+                             }
++                            if (entity instanceof AgeableMob ageableMob
++                                && ageableMob.isBaby()
++                                && systemLinkSnapshot != null
++                                && !systemLinkSnapshot.entities().babyMobSpawnFromSpawners()) {
++                                continue;
++                            }
+ 
+                             // Paper start
+                             entity.spawnedViaMobSpawner = true;
+@@ -228,6 +250,72 @@ public abstract class BaseSpawner {
+         }
+     }
+ 
++    private void mSpigotApplySpawnerSettings(final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot) {
++        if (snapshot == null) {
++            return;
++        }
++        final dev.systemlink.spigot.configuration.MSpigotConfig.SpawnerRangeSettings spawners = snapshot.worldRuntime().spawners();
++        final int minRange = Math.min(spawners.minRange(), spawners.maxRange());
++        final int maxRange = Math.max(spawners.minRange(), spawners.maxRange());
++        this.spawnRange = Math.max(minRange, Math.min(maxRange, spawners.spawnRange()));
++        if (spawners.requiredPlayerRange() > 0) {
++            this.requiredPlayerRange = spawners.requiredPlayerRange();
++        }
++        if (spawners.spawnCount() > 0) {
++            this.spawnCount = spawners.spawnCount();
++        }
++        if (spawners.maxNearbyEntities() > 0) {
++            this.maxNearbyEntities = spawners.maxNearbyEntities();
++        }
++        final dev.systemlink.spigot.configuration.MSpigotConfig.SpawnerSettings settings = snapshot.gameplay().spawnerSettings();
++        if (settings.enabled()) {
++            this.minSpawnDelay = settings.minSpawnDelay();
++            this.maxSpawnDelay = Math.max(settings.minSpawnDelay(), settings.maxSpawnDelay());
++        }
++    }
++
++    private boolean mSpigotCanTickSpawner(
++        final ServerLevel level,
++        final BlockPos pos,
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot
++    ) {
++        if (snapshot == null || !snapshot.gameplay().spawnerSettings().enabled()) {
++            return this.isNearPlayer(level, pos);
++        }
++        return !snapshot.gameplay().spawnerSettings().checks().checkForNearbyPlayers() || this.isNearPlayer(level, pos);
++    }
++
++    private boolean mSpigotCanSpawnInBlock(
++        final ServerLevel level,
++        final EntityType<?> entityType,
++        final Vec3 spawnPos,
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot
++    ) {
++        return snapshot != null
++            && snapshot.gameplay().spawnerSettings().enabled()
++            && !snapshot.gameplay().spawnerSettings().checks().spawnerBlockChecks()
++            || level.noCollision(entityType.getSpawnAABB(spawnPos.x, spawnPos.y, spawnPos.z));
++    }
++
++    private boolean mSpigotPreventsWaterSpawn(
++        final ServerLevel level,
++        final BlockPos spawnBlockPos,
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot
++    ) {
++        return snapshot != null
++            && snapshot.gameplay().spawnerSettings().enabled()
++            && snapshot.gameplay().spawnerSettings().checks().waterPreventSpawn()
++            && level.getFluidState(spawnBlockPos).is(FluidTags.WATER);
++    }
++
++    private boolean mSpigotSpawnerIgnoresRules(final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot) {
++        return snapshot != null && snapshot.gameplay().spawnerSettings().enabled() && snapshot.gameplay().spawnerSettings().ignoreRules();
++    }
++
++    private boolean mSpigotChecksMaxNearby(final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot snapshot) {
++        return snapshot == null || !snapshot.gameplay().spawnerSettings().enabled() || snapshot.gameplay().spawnerSettings().checks().spawnerMaxNearby();
++    }
++
+     public void delay(final Level level, final BlockPos pos) {
+         RandomSource random = level.random;
+         if (this.maxSpawnDelay <= this.minSpawnDelay) {
+diff --git a/net/minecraft/world/level/EntityGetter.java b/net/minecraft/world/level/EntityGetter.java
+index cc938f43c4a5e947ed87ca2001cbaca4084bf64c..0b004dca686fd99f8740d52ffa74051c9886a4b9 100644
+--- a/net/minecraft/world/level/EntityGetter.java
++++ b/net/minecraft/world/level/EntityGetter.java
+@@ -75,6 +75,10 @@ public interface EntityGetter extends ca.spottedleaf.moonrise.patches.chunk_syst
+     }
+ 
+     default List<VoxelShape> getEntityCollisions(final @Nullable Entity source, AABB testArea) { // Paper - optimise collisions - remove final
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if (systemLinkSnapshot != null && !systemLinkSnapshot.entities().entityCollisions()) {
++            return new java.util.ArrayList<>();
++        }
+         // Paper start - optimise collisions
+         // first behavior change is to correctly check for empty AABB
+         if (ca.spottedleaf.moonrise.patches.collisions.CollisionUtil.isEmpty(testArea)) {
+diff --git a/net/minecraft/world/level/block/RedStoneWireBlock.java b/net/minecraft/world/level/block/RedStoneWireBlock.java
+index 35e49078d8d36ae4683de26988435d971c7f0e89..c433750415d025d28f466bc5bed45ac46f198160 100644
+--- a/net/minecraft/world/level/block/RedStoneWireBlock.java
++++ b/net/minecraft/world/level/block/RedStoneWireBlock.java
+@@ -326,6 +326,9 @@ public class RedStoneWireBlock extends Block {
+         final @Nullable Orientation orientation,
+         final boolean shapeUpdateWiresAroundInitialPosition
+     ) {
++        if (!dev.systemlink.spigot.security.RedstoneAbuseLimiter.tryAcquire(pos)) {
++            return;
++        }
+         if (useExperimentalEvaluator(level)) {
+             new ExperimentalRedstoneWireEvaluator(this).updatePowerStrength(level, pos, state, orientation, shapeUpdateWiresAroundInitialPosition);
+         } else {
+diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+index fef616d7b92454a721f7a14941b62a8963080cc5..656fb941941e4413a443afaf84cdd7ddbe711301 100644
+--- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
+@@ -696,7 +696,8 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
+     }
+ 
+     private static @Nullable Container getBlockContainer(final Level level, final BlockPos pos, final BlockState state) {
+-        if (!level.spigotConfig.hopperCanLoadChunks && !level.hasChunkAt(pos)) return null; // Spigot
++        final dev.systemlink.spigot.configuration.MSpigotConfig.Snapshot systemLinkSnapshot = dev.systemlink.spigot.configuration.MSpigotConfig.current();
++        if ((!level.spigotConfig.hopperCanLoadChunks || systemLinkSnapshot != null && systemLinkSnapshot.chunks().preventLoadingForHoppers()) && !level.hasChunkAt(pos)) return null; // Spigot
+         Block block = state.getBlock();
+         if (block instanceof WorldlyContainerHolder worldlyContainerHolder) {
+             return worldlyContainerHolder.getContainer(state, level, pos);

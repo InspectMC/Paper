@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Inspect <42951016+InspectMC@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 11:41:34 -0500
+Subject: [PATCH] Add mSpigot configuration and knockback profiles
+
+
+diff --git a/net/minecraft/server/Main.java b/net/minecraft/server/Main.java
+index 693ce1c23c7be6406eda22da57aa4a1b86a08f5f..2b8c2c75b31d5b2c7780dd75dc0aa0b8ee2bc5db 100644
+--- a/net/minecraft/server/Main.java
++++ b/net/minecraft/server/Main.java
+@@ -149,6 +149,7 @@ public class Main {
+                 commandsConfiguration.options().copyDefaults(true);
+                 commandsConfiguration.setDefaults(org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(new java.io.InputStreamReader(Main.class.getClassLoader().getResourceAsStream("configurations/commands.yml"), java.nio.charset.StandardCharsets.UTF_8)));
+                 commandsConfiguration.save(commandFile);
++                dev.systemlink.spigot.configuration.MSpigotConfig.init((File) options.valueOf("mspigot-settings")); // Paper - SystemLink mSpigot configuration
+                 // CraftBukkit end
+                 LOGGER.info("Initialized '{}' and '{}'", settingsFile.toAbsolutePath(), eulaFile.toAbsolutePath());
+                 return;
+diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
+index 0b6d7f99edde802cb464baa5a4b2b4a4dcce684a..8ec14b751a43dc482ea4608ea4b2d1eae8262b11 100644
+--- a/net/minecraft/server/dedicated/DedicatedServer.java
++++ b/net/minecraft/server/dedicated/DedicatedServer.java
+@@ -233,6 +233,8 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
+         this.setPlayerList(new DedicatedPlayerList(this, this.registries(), this.playerDataStorage));
+         org.spigotmc.SpigotConfig.init((java.io.File) this.options.valueOf("spigot-settings"));
+         org.spigotmc.SpigotConfig.registerCommands();
++        dev.systemlink.spigot.configuration.MSpigotConfig.init((java.io.File) this.options.valueOf("mspigot-settings")); // Paper - SystemLink mSpigot configuration
++        dev.systemlink.spigot.configuration.MSpigotConfig.registerCommands(); // Paper - SystemLink mSpigot configuration
+         // Spigot end
+         // Paper start - initialize global and world-defaults configuration
+         this.paperConfigurations.initializeGlobalConfiguration(this.registryAccess());
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 784af721cf4dff2175a5182526c1f57fe2fde7c1..a3a11047c66653e89444e6b435f4aca8553ecb5b 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -1581,7 +1581,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         // Paper end - Check distance in entity interactions
+ 
+         // Paper start - Add SystemLink advanced knockback configuration
+-        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
++        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = dev.systemlink.spigot.configuration.MSpigotConfig.knockbackProfile(this.level().getWorld().getName());
+         final double baseKnockback = knockbackProfile.enabled ? knockbackProfile.baseKnockback : 0.4F;
+         this.knockback(baseKnockback, xd, zd, source, damage, source.getDirectEntity(), source.getDirectEntity() == null ? io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.DAMAGE : io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.ENTITY_ATTACK); // CraftBukkit // Paper - knockback events
+         // Paper end - Add SystemLink advanced knockback configuration
+@@ -1739,7 +1739,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     protected void blockedByItem(final LivingEntity defender, final DamageSource source, final float damage) {
+         // Paper start - Add SystemLink advanced knockback configuration
+-        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
++        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = dev.systemlink.spigot.configuration.MSpigotConfig.knockbackProfile(this.level().getWorld().getName());
+         final double shieldKnockback = knockbackProfile.enabled ? knockbackProfile.shieldHitKnockback : 0.5;
+         defender.knockback(shieldKnockback, defender.getX() - this.getX(), defender.getZ() - this.getZ(), source, damage, this, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.SHIELD_BLOCK); // CraftBukkit // Paper - fix attacker & knockback events
+         // Paper end - Add SystemLink advanced knockback configuration
+@@ -2072,7 +2072,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     private void knockback(double power, double xd, double zd, final DamageSource source, final float damage, final boolean comesFromEffect, @Nullable Entity attacker, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause eventCause, dev.systemlink.spigot.knockback.@Nullable Knockback customKnockback) {
+     // Paper end - Add SystemLink KnockbackBuilder API
+         // Paper start - Add SystemLink advanced knockback configuration
+-        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
++        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = dev.systemlink.spigot.configuration.MSpigotConfig.knockbackProfile(this.level().getWorld().getName());
+         power = customKnockback != null
+             ? customKnockback.applyResistance(this.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE))
+             : knockbackProfile.enabled
+diff --git a/net/minecraft/world/entity/player/Player.java b/net/minecraft/world/entity/player/Player.java
+index 8c182afda34a0c4f70a33a8a294ceaffad21b0c4..9e442d3ce5d6b6c64260c83ebfb1551e1c981b6f 100644
+--- a/net/minecraft/world/entity/player/Player.java
++++ b/net/minecraft/world/entity/player/Player.java
+@@ -1033,7 +1033,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+             ItemStack attackingItemStack = this.getWeaponItem();
+             DamageSource damageSource = this.createAttackSource(attackingItemStack); final DamageSource dmgSourceFinal = damageSource; // Paper - damage events
+             float attackStrengthScale = this.getAttackStrengthScale(0.5F);
+-            final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback; // Paper - Add SystemLink advanced knockback configuration
++            final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = dev.systemlink.spigot.configuration.MSpigotConfig.knockbackProfile(this.level().getWorld().getName()); // Paper - Add SystemLink advanced knockback configuration
+             float magicBoost = attackStrengthScale * (this.getEnchantedDamage(entity, baseDamage, damageSource) - baseDamage);
+             baseDamage *= this.baseDamageScaleFactor();
+             this.onAttack(entity); // Paper
+@@ -1274,7 +1274,7 @@ public abstract class Player extends Avatar implements ContainerUser {
+                     if (nearby.hurtServer(serverLevel, damageSource.knownCause(org.bukkit.event.entity.EntityDamageEvent.DamageCause.ENTITY_SWEEP_ATTACK), enchantedDamage) && !nearby.lastDamageCancelled) {
+                         // Paper end - Only apply knockback if the event is not canceled
+                         // Paper start - Add SystemLink advanced knockback configuration
+-                        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = this.level().paperConfig().systemLink.advancedKnockback;
++                        final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration knockbackProfile = dev.systemlink.spigot.configuration.MSpigotConfig.knockbackProfile(this.level().getWorld().getName());
+                         nearby.knockback(
+                             knockbackProfile.enabled ? knockbackProfile.sweepingEdgeKnockback : 0.4F, Mth.sin(this.getYRot() * Mth.DEG_TO_RAD), -Mth.cos(this.getYRot() * Mth.DEG_TO_RAD), damageSource, enchantedDamage, this, io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.SWEEP_ATTACK // Paper - knockback events
+                         );
+diff --git a/net/minecraft/world/entity/projectile/FishingHook.java b/net/minecraft/world/entity/projectile/FishingHook.java
+index c0bb1b62dfcdebbd34a8e8423fa36eb4924a55e5..7f0e16c853ea053c263099bd42c2fe2800b66142 100644
+--- a/net/minecraft/world/entity/projectile/FishingHook.java
++++ b/net/minecraft/world/entity/projectile/FishingHook.java
+@@ -510,9 +510,13 @@ public class FishingHook extends Projectile {
+                 }
+                 if (this.hookedIn != null) { // Paper - re-check to see if there is a hooked entity
+                 // CraftBukkit end
+-                this.pullEntity(this.hookedIn);
++                if (dev.systemlink.spigot.configuration.MSpigotConfig.get().gameplay().fishingHooksPullEntities()) { // Paper - SystemLink configurable fishing-hook pulling
++                    this.pullEntity(this.hookedIn);
++                }
+                 CriteriaTriggers.FISHING_ROD_HOOKED.trigger((ServerPlayer)owner, rod, this, Collections.emptyList());
+-                this.level().broadcastEntityEvent(this, EntityEvent.FISHING_ROD_REEL_IN);
++                if (dev.systemlink.spigot.configuration.MSpigotConfig.get().gameplay().fishingHooksPullEntities()) { // Paper - SystemLink configurable fishing-hook pulling
++                    this.level().broadcastEntityEvent(this, EntityEvent.FISHING_ROD_REEL_IN);
++                }
+                 dmg = this.hookedIn instanceof ItemEntity ? 3 : 5;
+                 } // Paper - re-check to see if there is a hooked entity
+             } else if (this.nibble > 0) {
+diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/Snowball.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/Snowball.java
+index d183a75c87626c680b96016c535f31acdfbc710e..f9796c3645b885847070507e02aae2e20cd3aa20 100644
+--- a/net/minecraft/world/entity/projectile/throwableitemprojectile/Snowball.java
++++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/Snowball.java
+@@ -57,6 +57,23 @@ public class Snowball extends ThrowableItemProjectile {
+         Entity entity = hitResult.getEntity();
+         int damage = entity instanceof Blaze ? 3 : 0;
+         entity.hurt(this.damageSources().thrown(this, this.getOwner()), damage);
++        // Paper start - SystemLink configurable snowball knockback
++        if (!this.level().isClientSide()
++            && entity instanceof net.minecraft.server.level.ServerPlayer player
++            && dev.systemlink.spigot.configuration.MSpigotConfig.get().gameplay().knockback().snowballKnockbackPlayers()) {
++            final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration profile = dev.systemlink.spigot.configuration.MSpigotConfig.knockbackProfile(this.level().getWorld().getName());
++            final net.minecraft.world.phys.Vec3 movement = this.getDeltaMovement();
++            player.knockback(
++                profile.enabled ? profile.baseKnockback : 0.4,
++                -movement.x,
++                -movement.z,
++                this.damageSources().thrown(this, this.getOwner()),
++                0.0F,
++                this.getOwner(),
++                io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.ENTITY_ATTACK
++            );
++        }
++        // Paper end - SystemLink configurable snowball knockback
+     }
+ 
+     @Override
+diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEgg.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEgg.java
+index b844dee92b175ddef4506d96e513e5ca3d27750d..65a58615d6859ef2d381831f037bb19fd4cce564 100644
+--- a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEgg.java
++++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEgg.java
+@@ -60,7 +60,25 @@ public class ThrownEgg extends ThrowableItemProjectile {
+     @Override
+     protected void onHitEntity(final EntityHitResult hitResult) {
+         super.onHitEntity(hitResult);
+-        hitResult.getEntity().hurt(this.damageSources().thrown(this, this.getOwner()), 0.0F);
++        final net.minecraft.world.entity.Entity entity = hitResult.getEntity(); // Paper - SystemLink configurable egg knockback
++        entity.hurt(this.damageSources().thrown(this, this.getOwner()), 0.0F);
++        // Paper start - SystemLink configurable egg knockback
++        if (!this.level().isClientSide()
++            && entity instanceof net.minecraft.server.level.ServerPlayer player
++            && dev.systemlink.spigot.configuration.MSpigotConfig.get().gameplay().knockback().eggKnockbackPlayers()) {
++            final dev.systemlink.spigot.knockback.AdvancedKnockbackConfiguration profile = dev.systemlink.spigot.configuration.MSpigotConfig.knockbackProfile(this.level().getWorld().getName());
++            final net.minecraft.world.phys.Vec3 movement = this.getDeltaMovement();
++            player.knockback(
++                profile.enabled ? profile.baseKnockback : 0.4,
++                -movement.x,
++                -movement.z,
++                this.damageSources().thrown(this, this.getOwner()),
++                0.0F,
++                this.getOwner(),
++                io.papermc.paper.event.entity.EntityKnockbackEvent.Cause.ENTITY_ATTACK
++            );
++        }
++        // Paper end - SystemLink configurable egg knockback
+     }
+ 
+     @Override
+diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
+index 3364e4b0810c4f81963cd5a48b7baabd621030ab..1544eb9cb72f8d27e2849cdd916b33ce55cce5f5 100644
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -126,8 +126,7 @@ public class PlayerDataStorage {
+     }
+ 
+     private boolean useAsyncIO() {
+-        final io.papermc.paper.configuration.GlobalConfiguration configuration = io.papermc.paper.configuration.GlobalConfiguration.get();
+-        return configuration != null && configuration.systemLink != null && configuration.systemLink.asyncPlayerData.enabled;
++        return dev.systemlink.spigot.configuration.MSpigotConfig.asyncPlayerDataEnabled();
+     }
+     // Paper end - SystemLink async player data
+ 

@@ -2480,6 +2480,14 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
     // Spigot end
 
     /**
+     * Gets the entry point for SystemLink Spigot APIs.
+     *
+     * @return the SystemLink API entry point
+     */
+    @NotNull
+    dev.systemlink.spigot.MSpigot mspigot();
+
+    /**
      * Restarts the server. If the server administrator has not configured restarting, the server will stop.
      */
     void restart();

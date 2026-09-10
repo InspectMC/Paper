@@ -59,6 +59,13 @@ public abstract class GameRule<T> implements net.kyori.adventure.translation.Tra
     @Deprecated(forRemoval = true, since = "1.21.11")
     public static final GameRule<Boolean> DO_DAYLIGHT_CYCLE = GameRules.ADVANCE_TIME;
     /**
+     * Whether time progresses from the current moment.
+     *
+     * @deprecated use {@link GameRules#ADVANCE_TIME}
+     */
+    @Deprecated(forRemoval = true, since = "1.21.11")
+    public static final GameRule<Boolean> ADVANCE_TIME = GameRules.ADVANCE_TIME; // mSpigot - binary compatibility for plugins compiled against the transitional GameRule constant
+    /**
      * Whether entities that are not mobs should have drops.
      *
      * @deprecated renamed to {@link GameRules#ENTITY_DROPS}
